@@ -44,3 +44,21 @@ Los registros de esta revisión están en `validation/sample-slice-*.log`; `dist
 ### Revisión de voces de samples
 
 Se añadieron regresiones de desbordamiento de las 12 voces, disparos en el mismo frame, fade de retirada de 5 ms y agotamiento de colas a tres frecuencias de muestreo. El caso de continuidad falló en el motor anterior y pasó tras la corrección. La integración comprueba que un acorde Original tiene el mismo audio que un solo disparo, aunque conserva cuatro notas MIDI. También cubre amplitud PCM intacta en importaciones nuevas, rechazo de amplitudes float extremas y compatibilidad del nivel al migrar y volver a guardar estados antiguos. La evidencia antes/después está en `validation/voice-review-*.log`; la resolución por hallazgo está en `REVIEW.md`.
+
+
+## Samples largos y BPM inicial
+
+Se eliminó el tope de 8 segundos y el límite de 8 MiB para importar archivos desde disco. 8 MiB pasa a ser únicamente el umbral de audio incrustado en presets: por encima se guarda una ruta y SHA-256 (esquema 4). El audio se carga completo en RAM, con presupuesto por muestra de hasta el 25% de la RAM física y límite de frames del motor; no se declara streaming ni duración infinita independiente de los recursos. La edición usa límites normalizados y un zoom adaptado a la duración. La cola comunicada al host crece con las muestras completas.
+
+Las pruebas añadidas cargan 12 segundos desde memoria y un WAV de **100 segundos, 4.800.000 frames y más de 8 MiB** desde disco. Verifican que no se trunca, que el estado externo pesa menos de 200 kB, restauración, escucha de un slice desde el segundo 90, ausencia/cambio del archivo y reubicación con verificación del contenido sin perder límites. También comprueban que el editor renderiza una referencia ausente. El BPM inicial es **128**; un proyecto guardado con 126 mantiene 126 al abrirlo. Los esquemas anteriores siguen cargando.
+
+Registros: `validation/long-samples-*.log`. Las pruebas de audio usan señales sintéticas; sigue pendiente probar los archivos reales del usuario en su DAW y ejecutar esta revisión en Windows/Actions. Los archivos externos deben acompañar a los proyectos al trasladarlos.
+
+Validación ejecutada para esta revisión: compilación y **CTest 2/2** en arm64 e Intel (Rosetta), **pluginval 1.0.4 nivel 5 con GUI: SUCCESS** en ambas arquitecturas, **13 pruebas Python** y **24 pruebas de release**, actionlint y `git diff --check` correctos. Se regeneraron e inspeccionaron las capturas del editor y de la interfaz con 128 BPM. Paquetes locales en `dist/long-samples/`; no se hizo commit, push ni publicación.
+
+
+## Revisión de referencias externas y selección de tramos largos
+
+Se verificó la escucha del tramo 90–95 de un WAV de 100 segundos: reproduce desde el inicio elegido y queda en silencio al terminar, conservando el archivo completo. Se añadieron pruebas de rechazo automático de rutas UNC, separadores mixtos y dispositivos, sintaxis local Windows/POSIX, conservación del slice y recuperación explícita con REUBICAR. La prueba de integración utiliza un archivo local con doble barra en POSIX; no contacta servidores de red. La clasificación nativa de unidades en Windows queda pendiente de ejecución allí.
+
+Validación ejecutada: compilación y CTest **2/2** en arm64 y x86_64 (Rosetta), pluginval 1.0.4 **nivel 5 con GUI: SUCCESS** en ambas, **13 pruebas Python**, **24 pruebas de release**, actionlint y `git diff --check` correctos. Logs: `validation/long-samples-review-*.log`. Paquetes corregidos en `dist/long-samples-review/`; se conservan los anteriores. Falta probar esta revisión en Windows/Actions y en el DAW con audio del usuario. No se hizo commit, push ni publicación.

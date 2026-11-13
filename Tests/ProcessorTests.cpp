@@ -92,12 +92,26 @@ std::vector<Event> timeline(int blockSize, double rate) {
 int main(int argc, char** argv) {
     juce::ScopedJuceInitialiser_GUI gui;
     try {
+        for (const auto* path : {R"(\\server\share\sound.wav)", "//server/share/sound.wav", R"(/\server/share/sound.wav)",
+                                 R"(\\?\UNC\server\share\sound.wav)", R"(\\?\C:\sound.wav)", R"(\\.\C:\sound.wav)"}) {
+            require(!zazza::SampleAsset::hasLocalPathSyntax(path, true)
+                    && !zazza::SampleAsset::hasLocalPathSyntax(path, false)
+                    && !zazza::SampleAsset::canAutoRestorePath(path), "Preset permits automatic UNC/device access");
+        }
+        require(zazza::SampleAsset::hasLocalPathSyntax(R"(C:\Samples\sound.wav)", true)
+                && zazza::SampleAsset::hasLocalPathSyntax("D:/Samples/sound.wav", true)
+                && zazza::SampleAsset::hasLocalPathSyntax("/Users/test/sound.wav", false), "Local sample path rejected");
+        require(!zazza::SampleAsset::hasLocalPathSyntax("C:sound.wav", true)
+                && !zazza::SampleAsset::hasLocalPathSyntax("/sound.wav", true)
+                && !zazza::SampleAsset::hasLocalPathSyntax("relative.wav", false), "Relative/root-relative path accepted");
         for (double rate : {44100.0, 48000.0, 96000.0}) {
             const auto a = timeline(64, rate); const auto b = timeline(257, rate);
             require(a.size() == b.size(), "Block-size-dependent MIDI count");
             for (size_t i = 0; i < a.size(); ++i) require(std::abs(a[i].sample - b[i].sample) <= 1 && a[i].note == b[i].note && a[i].channel == b[i].channel && a[i].on == b[i].on, "Block-size-dependent timing");
         }
-        ZazzaProcessor p; p.prepareToPlay(48000, 512);
+        ZazzaProcessor p;
+        require(std::abs(p.value("tempo") - 128.0f) < 0.001f && std::abs(p.currentTempo.load() - 128.0) < 0.001, "Default BPM must be 128");
+        p.prepareToPlay(48000, 512);
         juce::AudioBuffer<float> audio(2, 512); juce::MidiBuffer midi;
         p.processBlock(audio, midi); require(audio.getMagnitude(0, 512) == 0.0f && midi.isEmpty(), "Autoplay on plugin load");
         p.preview.store(true); p.processBlock(audio, midi); require(!midi.isEmpty(), "Preview not running");
@@ -166,8 +180,10 @@ int main(int argc, char** argv) {
                     && std::abs(sampled.value("layer0_sampleStart") - 0) < 1e-6f && std::abs(sampled.value("layer0_sampleEnd") - 1) < 1e-6f, "Import must default to full original playback");
             const juce::MemoryBlock bad("invalid", 7);
             require(sampled.loadSampleData(0, bad, "bad.wav").failed() && sampled.sampleName(0) == "My C4.wav", "Bad import replaced sample");
-            require(sampled.loadSampleData(0, testWave(384001), "too-long.wav").failed(), "Sample longer than 8 seconds accepted");
-            const juce::MemoryBlock oversized(zazza::SampleAsset::maxBytes + 1, true);
+            ZazzaProcessor longer;
+            require(longer.loadSampleData(0, testWave(48000 * 12), "twelve-seconds.wav").wasOk()
+                    && longer.sampleAsset(0)->audio.getNumSamples() == 48000 * 12, "Sample longer than eight seconds was rejected or trimmed");
+            const juce::MemoryBlock oversized(zazza::SampleAsset::maxEmbeddedBytes + 1, true);
             require(sampled.loadSampleData(0, oversized, "too-large.wav").failed(), "Oversized sample accepted");
             auto silent = wav; std::memset(static_cast<char*>(silent.getData()) + 44, 0, silent.getSize() - 44);
             require(sampled.loadSampleData(0, silent, "silence.wav").failed(), "Silent sample accepted");
@@ -314,6 +330,64 @@ int main(int argc, char** argv) {
             recalled.getStateInformation(saved);
             require(recalled.restoreState(saved.getData(), static_cast<int>(saved.getSize()))
                     && std::abs(recalled.sampleAsset(0)->audio.getSample(0, 100) - 0.8f) < 1e-5f, "Migrated preset loses legacy gain on second recall");
+        }
+        {
+            const auto longWave = testWave(48000 * 100);
+            const juce::TemporaryFile originalFile(".wav"), movedFile(".wav"), wrongFile(".wav");
+            require(originalFile.getFile().replaceWithData(longWave.getData(), longWave.getSize()), "Long WAV fixture write failed");
+            ZazzaProcessor longSample;
+            require(longSample.loadSample(0, originalFile.getFile()).wasOk(), "Long file import rejected");
+            const auto asset = longSample.sampleAsset(0);
+            require(asset && asset->external() && asset->encoded.getSize() == 0
+                    && asset->audio.getNumSamples() == 48000 * 100, "Long file trimmed or duplicated into preset storage");
+            require(longSample.getTailLengthSeconds() >= 100, "Host tail still truncates long one-shots");
+            longSample.setControlValue("layer0_sampleStart", 0.9f); longSample.setControlValue("layer0_sampleEnd", 0.95f);
+            longSample.setControlValue("tempo", 126);
+            juce::MemoryBlock saved; longSample.getStateInformation(saved);
+            require(saved.getSize() < 200000, "Long external sample bloats the DAW state");
+            ZazzaProcessor recalled;
+            require(recalled.restoreState(saved.getData(), static_cast<int>(saved.getSize())) && recalled.sampleAsset(0)
+                    && !recalled.sampleAsset(0)->missing() && recalled.sampleAsset(0)->audio.getNumSamples() == 48000 * 100,
+                    "Long external sample failed to restore");
+            require(std::abs(recalled.value("tempo") - 126) < 0.001f, "New BPM default overwrites saved project tempo");
+            recalled.prepareToPlay(48000, 512); recalled.auditionSample(0);
+            juce::AudioBuffer<float> output(2, 512); juce::MidiBuffer incoming;
+            recalled.processBlock(output, incoming);
+            require(output.getMagnitude(0, 512) > 0.001f && recalled.auditionProgress.load() >= 0.8999f,
+                    "Cannot audition a slice beyond the old eight-second limit");
+            for (int block = 0; block < 500; ++block) recalled.processBlock(output, incoming);
+            require(output.getMagnitude(0, 512) < 1e-8f && recalled.auditionProgress.load() < 0,
+                    "Slice audition continues beyond the selected end at second 95");
+           #if !JUCE_WINDOWS
+            // A real local file behind a // spelling detects a loader call on
+            // POSIX without contacting any network server in this regression.
+            auto blockedState = juce::ValueTree::fromXml(*juce::AudioProcessor::getXmlFromBinary(saved.getData(), static_cast<int>(saved.getSize())));
+            blockedState.getChildWithName("SAMPLES").getChild(0).setProperty("path", "/" + originalFile.getFile().getFullPathName(), nullptr);
+            juce::MemoryBlock blockedBytes; juce::AudioProcessor::copyXmlToBinary(*blockedState.createXml(), blockedBytes);
+            require(recalled.restoreState(blockedBytes.getData(), static_cast<int>(blockedBytes.getSize()))
+                    && recalled.sampleAsset(0)->missing() && std::abs(recalled.value("layer0_sampleStart") - 0.9f) < 1e-6f,
+                    "Blocked path opened automatically or lost slice settings");
+            require(recalled.relinkSample(0, originalFile.getFile()).wasOk() && !recalled.sampleAsset(0)->missing(),
+                    "Explicit relink cannot recover a blocked reference");
+           #endif
+            auto missingState = juce::ValueTree::fromXml(*juce::AudioProcessor::getXmlFromBinary(saved.getData(), static_cast<int>(saved.getSize())));
+            missingState.getChildWithName("SAMPLES").getChild(0).setProperty("path", movedFile.getFile().getFullPathName(), nullptr);
+            juce::MemoryBlock missingBytes; juce::AudioProcessor::copyXmlToBinary(*missingState.createXml(), missingBytes);
+            require(recalled.restoreState(missingBytes.getData(), static_cast<int>(missingBytes.getSize()))
+                    && recalled.sampleAsset(0)->missing() && recalled.sampleName(0).startsWith("FALTA:"), "Missing reference loses the session or is not reported");
+            recalled.getStateInformation(missingBytes);
+            require(recalled.restoreState(missingBytes.getData(), static_cast<int>(missingBytes.getSize())) && recalled.sampleAsset(0)->missing(), "Missing reference lost on save");
+            const auto wrong = testWave();
+            require(wrongFile.getFile().replaceWithData(wrong.getData(), wrong.getSize()), "Wrong-file fixture write failed");
+            require(recalled.relinkSample(0, wrongFile.getFile()).failed() && recalled.sampleAsset(0)->missing(), "Relink accepted a different recording");
+            require(movedFile.getFile().replaceWithData(longWave.getData(), longWave.getSize()), "Moved fixture write failed");
+            require(recalled.relinkSample(0, movedFile.getFile()).wasOk() && !recalled.sampleAsset(0)->missing()
+                    && std::abs(recalled.value("layer0_sampleStart") - 0.9f) < 1e-6f
+                    && std::abs(recalled.value("layer0_sampleEnd") - 0.95f) < 1e-6f, "Relink reset the selected slice");
+            require(movedFile.getFile().replaceWithData(wrong.getData(), wrong.getSize()), "Changed fixture write failed");
+            require(recalled.restoreState(missingBytes.getData(), static_cast<int>(missingBytes.getSize())) && recalled.sampleAsset(0)->missing(), "Changed referenced audio silently substituted");
+            SampleEditor unavailable(recalled, 0, [] {}); unavailable.setSize(1080, 540);
+            require(unavailable.createComponentSnapshot(unavailable.getLocalBounds()).isValid(), "Missing sample editor cannot render");
         }
         p.setControlValue("layer1_enabled", 0); require(p.exportMidi().getTrack(2)->getNumEvents() == 2, "Muted layer exported notes");
         juce::MemoryOutputStream midiBytes; require(p.exportMidi().writeTo(midiBytes, 1), "Cannot serialize MIDI");

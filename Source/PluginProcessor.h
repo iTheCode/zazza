@@ -16,7 +16,7 @@ public:
     const juce::String getName() const override { return "Zazza"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return true; }
-    double getTailLengthSeconds() const override { return 8.25; }
+    double getTailLengthSeconds() const override;
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -29,6 +29,7 @@ public:
     void generateIdea(bool newSeed);
     void applyStyle(int style);
     juce::Result loadSample(int layer, const juce::File&);
+    juce::Result relinkSample(int layer, const juce::File&);
     juce::Result loadSampleData(int layer, const juce::MemoryBlock&, const juce::String& name);
     void clearSample(int layer);
     juce::String sampleName(int layer) const;
@@ -47,7 +48,7 @@ public:
     std::atomic<bool> preview { false };
     std::atomic<int> playingStep { -1 };
     std::atomic<float> peak { 0.0f };
-    std::atomic<double> currentTempo { 126.0 };
+    std::atomic<double> currentTempo { 128.0 };
     std::atomic<bool> hostRunning { false };
     std::atomic<bool> panicRequested { false };
 private:
@@ -75,5 +76,7 @@ private:
     float masterSmoothed = 0.7f;
     std::atomic<bool> stateChanged { false };
     void stopGenerated(int sample);
+    juce::Result installSample(int layer, std::shared_ptr<const zazza::SampleAsset>, bool resetSlice);
+    std::array<std::atomic<double>, zazza::layers> sampleDurations {};
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ZazzaProcessor)
 };

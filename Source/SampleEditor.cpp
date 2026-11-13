@@ -11,7 +11,7 @@ void SampleEditor::Waveform::rebuild() {
     if (getWidth() <= 0 || getHeight() <= 0) return;
     cache = juce::Image(juce::Image::ARGB, getWidth(), getHeight(), true);
     juce::Graphics g(cache);
-    if (!asset) return;
+    if (!asset || asset->missing()) return;
     const auto& audio = asset->audio;
     const int channels = audio.getNumChannels(), length = audio.getNumSamples();
     for (int c = 0; c < channels; ++c) {
@@ -20,8 +20,8 @@ void SampleEditor::Waveform::rebuild() {
         g.setColour(blue.withAlpha(0.15f)); g.drawHorizontalLine(static_cast<int>(centre), 0, static_cast<float>(getWidth()));
         g.setColour(blue);
         for (int x = 0; x < getWidth(); ++x) {
-            const int first = juce::jlimit(0, length - 1, static_cast<int>(position(static_cast<float>(x)) * static_cast<float>(length)));
-            const int last = juce::jlimit(first + 1, length, static_cast<int>(position(static_cast<float>(x + 1)) * static_cast<float>(length)));
+            const int first = juce::jlimit(0, length - 1, static_cast<int>(position(static_cast<float>(x)) * static_cast<double>(length)));
+            const int last = juce::jlimit(first + 1, length, static_cast<int>(position(static_cast<float>(x + 1)) * static_cast<double>(length)));
             const auto range = audio.findMinMax(c, first, last - first);
             g.drawVerticalLine(x, centre - range.getEnd() * height * 0.45f, centre - range.getStart() * height * 0.45f + 1);
         }
@@ -47,7 +47,7 @@ void SampleEditor::Waveform::mouseDown(const juce::MouseEvent& e) {
     mouseDrag(e);
 }
 void SampleEditor::Waveform::mouseDrag(const juce::MouseEvent& e) {
-    if (!asset || !select) return;
+    if (!asset || asset->missing() || !select) return;
     const float minimum = 2.0f / static_cast<float>(asset->audio.getNumSamples());
     const auto p = position(e.position.x);
     if (draggingStart) select(juce::jlimit(0.0f, std::max(0.0f, end - minimum), p), end);
@@ -70,10 +70,15 @@ SampleEditor::SampleEditor(ZazzaProcessor& p, int l, std::function<void()> close
     zoom.setName("Zoom de forma de onda"); scroll.setName("Desplazamiento de forma de onda");
     wave.setName("Forma de onda: arrastra inicio o fin del slice");
     begin.setNumDecimalPlacesToDisplay(4); end.setNumDecimalPlacesToDisplay(4);
-    zoom.setRange(1, 32, 1); zoom.setValue(1); scroll.setRange(0, 1, 0.001);
-    zoom.onValueChange = [this] { updateView(); }; scroll.onValueChange = [this] { updateView(); };
-    begin.onValueChange = [this] { if (asset) selection(static_cast<float>(begin.getValue() * asset->rate / asset->audio.getNumSamples()), wave.end); };
-    end.onValueChange = [this] { if (asset) selection(wave.begin, static_cast<float>(end.getValue() * asset->rate / asset->audio.getNumSamples())); };
+    zoom.setRange(1, 32, 1); zoom.setValue(1); scroll.setRange(0, 1, 0); scroll.setNumDecimalPlacesToDisplay(7);
+    zoom.onValueChange = [this] {
+        const auto span = 1.0 / zoom.getValue();
+        const auto centre = (static_cast<double>(wave.begin) + wave.end) * 0.5;
+        scroll.setValue(span < 1 ? juce::jlimit(0.0, 1.0, (centre - span * 0.5) / (1.0 - span)) : 0, juce::dontSendNotification);
+        updateView();
+    }; scroll.onValueChange = [this] { updateView(); };
+    begin.onValueChange = [this] { if (asset && !asset->missing()) selection(static_cast<float>(begin.getValue() * asset->rate / asset->audio.getNumSamples()), wave.end); };
+    end.onValueChange = [this] { if (asset && !asset->missing()) selection(wave.begin, static_cast<float>(end.getValue() * asset->rate / asset->audio.getNumSamples())); };
     for (int note = 0; note < 128; ++note) root.addItem(juce::MidiMessage::getMidiNoteName(note, true, true, 4), note + 1);
     root.setTooltip("Nota original de la muestra. C4 = MIDI 60. Afinado cambia velocidad y duracion; Original no transpone.");
     playback.addItemList({"Gate / caida", "Completo"}, 1); pitch.addItemList({"Original", "Afinado"}, 1);
@@ -93,7 +98,7 @@ SampleEditor::SampleEditor(ZazzaProcessor& p, int l, std::function<void()> close
 }
 SampleEditor::~SampleEditor() { stopTimer(); owner.stopSampleAudition(); }
 void SampleEditor::selection(float a, float b) {
-    if (!asset) return;
+    if (!asset || asset->missing()) return;
     const float minimum = 2.0f / static_cast<float>(asset->audio.getNumSamples());
     a = juce::jlimit(0.0f, 1.0f - minimum, a);
     b = juce::jlimit(a + minimum, 1.0f, b);
@@ -111,8 +116,11 @@ void SampleEditor::timerCallback() {
     if (current != asset) {
         asset = current; wave.asset = asset;
         title.setText(asset ? asset->name : "Sin sample", juce::dontSendNotification);
-        if (asset) {
+        if (asset && !asset->missing()) {
             const double duration = asset->audio.getNumSamples() / asset->rate;
+            zoom.setRange(1, std::max(32.0, duration * 100), 0); zoom.setSkewFactor(0.25);
+            zoom.setValue(1, juce::dontSendNotification); scroll.setValue(0, juce::dontSendNotification);
+            wave.span = 1; wave.viewStart = 0;
             begin.setRange(0, duration, 0); end.setRange(0, duration, 0);
         }
         wave.rebuild();
@@ -120,13 +128,16 @@ void SampleEditor::timerCallback() {
     wave.begin = owner.value(ZazzaProcessor::layerId(layer, "sampleStart"));
     wave.end = owner.value(ZazzaProcessor::layerId(layer, "sampleEnd"));
     wave.playhead = owner.auditionProgress.load();
-    if (asset) {
+    if (asset && !asset->missing()) {
         const double duration = asset->audio.getNumSamples() / asset->rate;
         begin.setValue(wave.begin * duration, juce::dontSendNotification); end.setValue(wave.end * duration, juce::dontSendNotification);
         info.setText("Archivo: " + juce::String(duration, 3) + " s   |   Slice: " + juce::String((wave.end - wave.begin) * duration, 3)
-                     + " s   |   " + juce::String(asset->rate / 1000, 1) + " kHz   |   " + juce::String(asset->audio.getNumChannels()) + " canales", juce::dontSendNotification);
+                     + " s   |   " + juce::String(asset->rate / 1000, 1) + " kHz   |   " + juce::String(asset->audio.getNumChannels()) + " canales" + (asset->external() ? "   |   Vinculado al archivo" : "   |   Audio incrustado"), juce::dontSendNotification);
     }
-    listen.setEnabled(asset != nullptr); full.setEnabled(asset != nullptr);
+    const bool available = asset && !asset->missing();
+    if (!available) info.setText("Archivo no disponible o modificado. Cierra y pulsa REUBICAR para seleccionar el original.", juce::dontSendNotification);
+    listen.setEnabled(available); full.setEnabled(available); begin.setEnabled(available); end.setEnabled(available);
+    zoom.setEnabled(available); scroll.setEnabled(available);
     wave.repaint();
 }
 void SampleEditor::paint(juce::Graphics& g) {

@@ -25,7 +25,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout ZazzaProcessor::makeParamete
     choice("style", "Estilo", {"House", "Tech house", "Minimal", "Deep house", "Rollin"}, 1);
     real("density", "Densidad al generar", 0.0f, 1.0f, 0.6f);
     real("swing", "Swing", 0.0f, 0.6f, 0.16f);
-    real("tempo", "BPM de escucha", 60.0f, 180.0f, 126.0f);
+    real("tempo", "BPM de escucha", 60.0f, 180.0f, 128.0f);
     real("master", "Salida dB", -48.0f, 0.0f, -6.0f);
     real("duck", "Bombeo 4/4", 0.0f, 1.0f, 0.25f);
     real("drive", "Saturacion", 0.0f, 1.0f, 0.1f);
@@ -126,31 +126,55 @@ void ZazzaProcessor::applyStyle(int style) {
     generateIdea(false);
 }
 juce::Result ZazzaProcessor::loadSample(int layer, const juce::File& file) {
-    if (file.getSize() <= 0 || file.getSize() > static_cast<juce::int64>(zazza::SampleAsset::maxBytes))
-        return juce::Result::fail("Usa un WAV/AIFF de hasta 8 MiB.");
-    juce::MemoryBlock bytes;
-    if (!file.loadFileAsData(bytes)) return juce::Result::fail("No se pudo abrir el archivo.");
-    return loadSampleData(layer, bytes, file.getFileName());
+    if (layer < 0 || layer >= zazza::layers) return juce::Result::fail("Capa invalida.");
+    juce::String error;
+    auto decoded = zazza::SampleAsset::fromFile(file, error);
+    if (!decoded) return juce::Result::fail(error);
+    return installSample(layer, std::move(decoded), true);
+}
+juce::Result ZazzaProcessor::relinkSample(int layer, const juce::File& file) {
+    const auto current = sampleAsset(layer);
+    if (!current || !current->external()) return juce::Result::fail("No hay un archivo externo que reubicar.");
+    juce::String error;
+    auto decoded = zazza::SampleAsset::fromFile(file, error, current->legacyGain, current->sourceHash);
+    if (!decoded) return juce::Result::fail(error);
+    return installSample(layer, std::move(decoded), false);
 }
 juce::Result ZazzaProcessor::loadSampleData(int layer, const juce::MemoryBlock& bytes, const juce::String& name) {
     if (layer < 0 || layer >= zazza::layers) return juce::Result::fail("Capa invalida.");
     juce::String error;
     auto decoded = zazza::SampleAsset::decode(bytes, name, error);
     if (!decoded) return juce::Result::fail(error);
+    return installSample(layer, std::move(decoded), true);
+}
+juce::Result ZazzaProcessor::installSample(int layer, std::shared_ptr<const zazza::SampleAsset> decoded, bool resetSlice) {
     std::shared_ptr<const zazza::SampleAsset> retired;
     {
         const juce::ScopedLock lock(getCallbackLock());
         retired = std::move(samples[static_cast<size_t>(layer)]);
+        sampleDurations[static_cast<size_t>(layer)].store(decoded->audio.getNumSamples() / decoded->rate);
         samples[static_cast<size_t>(layer)] = std::move(decoded);
         synth.reset(); stateChanged.store(true);
     }
-    // Host notifications can synchronise with the audio thread; never hold its lock here.
-    setControlValue(layerId(layer, "sampleStart"), 0.0f);
-    setControlValue(layerId(layer, "sampleEnd"), 1.0f);
-    setControlValue(layerId(layer, "samplePlayback"), 1.0f);
-    setControlValue(layerId(layer, "samplePitch"), 0.0f);
-    setControlValue(layerId(layer, "source"), 1.0f);
+    // Host notifications stay outside the audio callback lock.
+    if (resetSlice) {
+        setControlValue(layerId(layer, "sampleStart"), 0.0f);
+        setControlValue(layerId(layer, "sampleEnd"), 1.0f);
+        setControlValue(layerId(layer, "samplePlayback"), 1.0f);
+        setControlValue(layerId(layer, "samplePitch"), 0.0f);
+        setControlValue(layerId(layer, "source"), 1.0f);
+    }
     return juce::Result::ok();
+}
+double ZazzaProcessor::getTailLengthSeconds() const {
+    double tail = 0.25;
+    for (size_t layer = 0; layer < sampleDurations.size(); ++layer) {
+        const double duration = sampleDurations[layer].load();
+        if (duration <= 0 || refs[layer].samplePlayback->load() < 0.5f) continue;
+        const double stretch = refs[layer].samplePitch->load() > 0.5f ? std::exp2(refs[layer].sampleRoot->load() / 12.0) : 1.0;
+        tail = std::max(tail, duration * stretch + 0.25);
+    }
+    return tail;
 }
 void ZazzaProcessor::clearSample(int layer) {
     if (layer < 0 || layer >= zazza::layers) return;
@@ -158,6 +182,7 @@ void ZazzaProcessor::clearSample(int layer) {
     {
         const juce::ScopedLock lock(getCallbackLock());
         retired = std::move(samples[static_cast<size_t>(layer)]);
+        sampleDurations[static_cast<size_t>(layer)].store(0);
         synth.reset(); stateChanged.store(true);
     }
     setControlValue(layerId(layer, "source"), 0.0f);
@@ -169,7 +194,8 @@ std::shared_ptr<const zazza::SampleAsset> ZazzaProcessor::sampleAsset(int layer)
 juce::String ZazzaProcessor::sampleName(int layer) const {
     const juce::ScopedLock lock(getCallbackLock());
     if (layer < 0 || layer >= zazza::layers || !samples[static_cast<size_t>(layer)]) return {};
-    return samples[static_cast<size_t>(layer)]->name;
+    const auto& asset = samples[static_cast<size_t>(layer)];
+    return (asset->missing() ? "FALTA: " : "") + asset->name;
 }
 void ZazzaProcessor::prepareToPlay(double sampleRate, int) {
     rate = sampleRate; synth.prepare(rate); auditionLayer = -1; auditionProgress.store(-1); auditionRequest.store(-1); generatedMidi.ensureSize(262144);
@@ -345,13 +371,16 @@ void ZazzaProcessor::getStateInformation(juce::MemoryBlock& block) {
         const juce::ScopedLock lock(getCallbackLock());
         savedSamples = samples;
     }
-    state.setProperty("schemaVersion", 3, nullptr);
+    state.setProperty("schemaVersion", 4, nullptr);
     juce::ValueTree sampleTree("SAMPLES");
     for (int layer = 0; layer < zazza::layers; ++layer) if (const auto& sample = savedSamples[static_cast<size_t>(layer)]) {
         juce::ValueTree child("SAMPLE"); child.setProperty("layer", layer, nullptr);
         child.setProperty("name", sample->name, nullptr);
         child.setProperty("legacyGain", sample->legacyGain, nullptr);
-        child.setProperty("data", juce::Base64::toBase64(sample->encoded.getData(), sample->encoded.getSize()), nullptr);
+        if (sample->external()) {
+            child.setProperty("path", sample->sourcePath, nullptr);
+            child.setProperty("sha256", sample->sourceHash, nullptr);
+        } else child.setProperty("data", juce::Base64::toBase64(sample->encoded.getData(), sample->encoded.getSize()), nullptr);
         sampleTree.addChild(child, -1, nullptr);
     }
     state.addChild(sampleTree, -1, nullptr);
@@ -362,7 +391,7 @@ bool ZazzaProcessor::restoreState(const void* data, int size) {
     if (auto xml = getXmlFromBinary(data, size)) if (xml->hasTagName(parameters.state.getType())) {
         auto state = juce::ValueTree::fromXml(*xml);
         const auto version = state.getProperty("schemaVersion", 1).toString();
-        if (version != "1" && version != "2" && version != "3") return false;
+        if (version != "1" && version != "2" && version != "3" && version != "4") return false;
         std::array<std::shared_ptr<const zazza::SampleAsset>, zazza::layers> decoded;
         const auto sampleTree = state.getChildWithName("SAMPLES");
         if (version != "1") {
@@ -371,15 +400,35 @@ bool ZazzaProcessor::restoreState(const void* data, int size) {
                 const auto layerText = child.getProperty("layer").toString();
                 const int layer = layerText.getIntValue();
                 if (!child.hasType("SAMPLE") || layerText != juce::String(layer) || layer < 0 || layer >= zazza::layers || decoded[static_cast<size_t>(layer)]) return false;
+                const auto legacyGain = child.getProperty("legacyGain").toString();
+                if ((version == "3" || version == "4") && legacyGain != "0" && legacyGain != "1") return false;
+                const bool legacy = (version == "1" || version == "2") || legacyGain == "1";
+                if (version == "4" && child.hasProperty("path")) {
+                    const auto path = child.getProperty("path").toString();
+                    const auto hash = child.getProperty("sha256").toString();
+                    const bool nativePath = juce::File::isAbsolutePath(path);
+                    const bool foreignPath = path.startsWithChar('/') || path.startsWith("\\\\")
+                        || (path.length() > 2 && juce::CharacterFunctions::isLetter(path[0]) && path[1] == ':' && (path[2] == '/' || path[2] == '\\'));
+                    if (child.hasProperty("data") || path.length() > 32768 || (!nativePath && !foreignPath) || hash.length() != 64
+                        || !hash.containsOnly("0123456789abcdef")) return false;
+                    juce::String error;
+                    if (zazza::SampleAsset::canAutoRestorePath(path))
+                        decoded[static_cast<size_t>(layer)] = zazza::SampleAsset::fromFile(juce::File(path), error, legacy, hash);
+                    if (!decoded[static_cast<size_t>(layer)]) {
+                        auto missing = std::make_shared<zazza::SampleAsset>();
+                        missing->sourcePath = path; missing->sourceHash = hash; missing->legacyGain = legacy;
+                        missing->name = child.getProperty("name").toString().substring(0, 256);
+                        decoded[static_cast<size_t>(layer)] = std::move(missing);
+                    }
+                    continue;
+                }
                 const auto base64 = child.getProperty("data").toString();
-                if (base64.length() > static_cast<int>(zazza::SampleAsset::maxBytes * 4 / 3 + 8)) return false;
+                if (base64.length() > static_cast<int>(zazza::SampleAsset::maxEmbeddedBytes * 4 / 3 + 8)) return false;
                 juce::MemoryOutputStream bytes;
                 if (!juce::Base64::convertFromBase64(bytes, base64)) return false;
                 juce::String error;
-                const auto legacyGain = child.getProperty("legacyGain").toString();
-                if (version == "3" && legacyGain != "0" && legacyGain != "1") return false;
                 decoded[static_cast<size_t>(layer)] = zazza::SampleAsset::decode(bytes.getMemoryBlock(), child.getProperty("name").toString(), error,
-                                                                                  version != "3" || legacyGain == "1");
+                                                                                  legacy);
                 if (!decoded[static_cast<size_t>(layer)]) return false;
             }
             state.removeChild(sampleTree, nullptr);
@@ -404,6 +453,8 @@ bool ZazzaProcessor::restoreState(const void* data, int size) {
         {
             const juce::ScopedLock lock(getCallbackLock());
             samples.swap(decoded);
+            for (size_t layer = 0; layer < samples.size(); ++layer)
+                sampleDurations[layer].store(samples[layer] ? samples[layer]->audio.getNumSamples() / samples[layer]->rate : 0);
             synth.reset(); stateChanged.store(true);
         }
         parameters.replaceState(state);

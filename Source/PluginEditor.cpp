@@ -88,7 +88,7 @@ ZazzaEditor::ZazzaEditor(ZazzaProcessor& p)
         controls.sampleRoot.setName("Nota raiz del sample de " + juce::String(layerNames[l]));
         controls.sampleRoot.setTooltip("Nota original del sample. C4 = MIDI 60. Ajustala para afinarlo con el patron. No se detecta automaticamente.");
         controls.sampleLabel.setFont(juce::FontOptions(11.0f));
-        controls.importSample.setTooltip("Cargar WAV/AIFF mono o estereo: hasta 8 segundos y 8 MiB. Mejor con una nota individual.");
+        controls.importSample.setTooltip("Cargar WAV/AIFF mono o estereo: sin limite fijo de segundos. Los archivos grandes se vinculan al preset.");
         controls.removeSample.setTooltip("Volver a sintesis y quitar el sample de esta capa. No borra tu archivo original.");
         controls.editSample.onClick = [this, l] { editSample(l); };
         addAndMakeVisible(controls.editSample);
@@ -180,6 +180,9 @@ void ZazzaEditor::timerCallback() {
         controls.sampleLabel.setTooltip(name.isEmpty() ? "Usa preferentemente una nota individual, sin silencio inicial." : name);
         const bool sampleMode = owner.value(ZazzaProcessor::layerId(layer, "source")) > 0.5f;
         controls.wave.setEnabled(!sampleMode); controls.sampleRoot.setEnabled(sampleMode);
+        const auto asset = owner.sampleAsset(layer);
+        controls.importSample.setButtonText(asset && asset->missing() ? "REUBICAR" : "IMPORTAR");
+        controls.sampleLabel.setTooltip(asset && asset->external() ? "Archivo vinculado: " + asset->sourcePath : name);
         controls.removeSample.setEnabled(!name.isEmpty()); controls.editSample.setEnabled(!name.isEmpty());
     }
     const auto p = owner.pattern();
@@ -274,7 +277,8 @@ void ZazzaEditor::filesDropped(const juce::StringArray& files, int x, int y) {
     importSampleFile(juce::jlimit(0, 2, (x - 20) / 364), juce::File(files[0]));
 }
 void ZazzaEditor::importSampleFile(int layer, const juce::File& file) {
-    const auto result = owner.loadSample(layer, file);
+    const auto current = owner.sampleAsset(layer);
+    const auto result = current && current->missing() ? owner.relinkSample(layer, file) : owner.loadSample(layer, file);
     message.setText(result.wasOk() ? "Sample completo a velocidad original. Elige un slice y escucha antes de generar." : result.getErrorMessage(), juce::dontSendNotification);
     timerCallback();
     if (result.wasOk()) editSample(layer);
@@ -286,7 +290,7 @@ void ZazzaEditor::editSample(int layer) {
     addAndMakeVisible(*sampleEditor); sampleEditor->setBounds(20, 294, 1080, 540); sampleEditor->toFront(true);
 }
 void ZazzaEditor::chooseSample(int layer) {
-    chooser = std::make_unique<juce::FileChooser>("Importar una nota WAV/AIFF", juce::File(), "*.wav;*.aif;*.aiff");
+    chooser = std::make_unique<juce::FileChooser>("Importar o reubicar audio WAV/AIFF", juce::File(), "*.wav;*.aif;*.aiff");
     chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
         [safe = juce::Component::SafePointer<ZazzaEditor>(this), layer](const juce::FileChooser& dialog) {
             if (safe != nullptr && dialog.getResult() != juce::File()) safe->importSampleFile(layer, dialog.getResult());

@@ -179,8 +179,8 @@ std::array<float, 2> Synth::render(const std::array<LayerSound, layers>& sounds,
             const auto& sample = samples[index];
             if (sample.enabled && voice.sampleEnd < 0) {
                 if (sample.left == nullptr || sample.length < 2 || !std::isfinite(sample.start) || !std::isfinite(sample.end)) { voice.note = -1; continue; }
-                const int begin = static_cast<int>(std::clamp(sample.start, 0.0f, 1.0f) * static_cast<float>(sample.length));
-                voice.sampleEnd = static_cast<int>(std::clamp(sample.end, 0.0f, 1.0f) * static_cast<float>(sample.length));
+                const int begin = static_cast<int>(static_cast<double>(std::clamp(sample.start, 0.0f, 1.0f)) * sample.length);
+                voice.sampleEnd = static_cast<int>(static_cast<double>(std::clamp(sample.end, 0.0f, 1.0f)) * sample.length);
                 if (voice.sampleEnd - begin < 2) { voice.note = -1; continue; }
                 voice.samplePosition = begin;
                 voice.oneShot = sample.oneShot;
