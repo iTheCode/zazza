@@ -1,0 +1,15 @@
+build*/
+dist/
+.tools/
+validation/
+.DS_Store
+.vecchagent*
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+*.log
+.env*
+*.pem
+*.key
+SDKs/

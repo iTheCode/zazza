@@ -1,0 +1,95 @@
+name: Build and test Zazza
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zazza-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Portable musical engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cmake -S . -B build-core -DZAZZA_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-core --parallel 2
+      - run: ctest --test-dir build-core --output-on-failure
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s Tests -p '*Tests.py'
+
+  plugins:
+    name: ${{ matrix.platform }}
+    needs: core
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            platform: macOS-arm64
+          - os: macos-15-intel
+            arch: x86_64
+            platform: macOS-x86_64
+          - os: windows-2022
+            arch: x86_64
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Test build and validation scripts
+        run: python -m unittest discover -s Tests -p '*Tests.py'
+      # Pushes (main/master/v* tags) on macOS are Developer ID signed + notarized for Gatekeeper.
+      # Secrets: MACOS_DEVELOPER_ID_P12_BASE64, MACOS_DEVELOPER_ID_P12_PASSWORD,
+      #          ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (same as iTheCode/vultur)
+      - name: Signing keychain (macOS push)
+        if: runner.os == 'macOS' && github.event_name == 'push'
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          export KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          bash .github/scripts/apple-signing.sh
+          echo "MACOS_SIGN_IDENTITY=Developer ID Application: Luis Lara (4457VH52UA)" >> "$GITHUB_ENV"
+      - name: Compile, test, verify and package
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: python scripts/build.py --arch "${{ matrix.arch }}" --pluginval --package
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Zazza-${{ matrix.platform }}
+          path: dist/Zazza-*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve validation logs, including failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: validation-${{ matrix.platform }}
+          path: |
+            validation/*.log
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+          retention-days: 14
