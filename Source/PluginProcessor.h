@@ -16,7 +16,7 @@ public:
     const juce::String getName() const override { return "Zazza"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return true; }
-    double getTailLengthSeconds() const override { return 0.25; }
+    double getTailLengthSeconds() const override { return 8.25; }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -32,6 +32,10 @@ public:
     juce::Result loadSampleData(int layer, const juce::MemoryBlock&, const juce::String& name);
     void clearSample(int layer);
     juce::String sampleName(int layer) const;
+    std::shared_ptr<const zazza::SampleAsset> sampleAsset(int layer) const;
+    void auditionSample(int layer) { auditionRequest.store(layer); }
+    void stopSampleAudition() { auditionRequest.store(-2); }
+    std::atomic<float> auditionProgress { -1.0f };
     static constexpr int maxStateBytes = 40 * 1024 * 1024;
     void setControlValue(const juce::String&, float);
     float value(const juce::String&) const;
@@ -51,11 +55,15 @@ private:
     struct StepRefs { std::atomic<float> *on, *degree, *velocity, *gate; };
     struct LayerRefs {
         std::atomic<float> *gain, *cutoff, *decay, *pan, *wave, *octave, *enabled, *source, *sampleRoot;
+        std::atomic<float> *sampleStart, *sampleEnd, *samplePlayback, *samplePitch;
         std::array<StepRefs, zazza::steps> steps;
     };
     std::array<LayerRefs, zazza::layers> refs;
     std::atomic<float> *root, *scale, *swing, *tempo, *master, *duck, *drive, *sequencer;
     zazza::Synth synth;
+    std::atomic<int> auditionRequest { -1 };
+    int auditionLayer = -1, auditionEnd = 0;
+    double auditionPosition = 0.0, auditionStart = 0.0;
     // Mutated only under the callback lock, after decoding outside it. The audio
     // thread uses raw views while holding that lock; it never destroys assets.
     std::array<std::shared_ptr<const zazza::SampleAsset>, zazza::layers> samples;

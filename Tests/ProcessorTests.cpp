@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "StateMigration.h"
+#include "SampleEditor.h"
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <cmath>
 #include <iostream>
@@ -159,6 +160,10 @@ int main(int argc, char** argv) {
             const auto wav = testWave();
             require(sampled.loadSampleData(0, wav, "My C4.wav").wasOk(), "WAV import failed");
             require(sampled.sampleName(0) == "My C4.wav" && sampled.value("layer0_source") > 0.5f, "Sample not selected");
+            require(sampled.sampleAsset(0)->audio.getNumSamples() == 24000
+                    && sampled.sampleAsset(0)->encoded == wav, "Import trimmed or rewrote the original sample");
+            require(std::abs(sampled.value("layer0_samplePlayback") - 1) < 1e-6f && std::abs(sampled.value("layer0_samplePitch") - 0) < 1e-6f
+                    && std::abs(sampled.value("layer0_sampleStart") - 0) < 1e-6f && std::abs(sampled.value("layer0_sampleEnd") - 1) < 1e-6f, "Import must default to full original playback");
             const juce::MemoryBlock bad("invalid", 7);
             require(sampled.loadSampleData(0, bad, "bad.wav").failed() && sampled.sampleName(0) == "My C4.wav", "Bad import replaced sample");
             require(sampled.loadSampleData(0, testWave(384001), "too-long.wav").failed(), "Sample longer than 8 seconds accepted");
@@ -174,9 +179,20 @@ int main(int argc, char** argv) {
             const float cutoff = sampled.value("layer0_cutoff"); sampled.generatePattern(true);
             require(std::abs(sampled.value("layer0_cutoff") - cutoff) < 0.001f, "Pattern-only variation changed sound");
             sampled.setControlValue("sequencer", 0); sampled.setControlValue("layer1_enabled", 0); sampled.setControlValue("layer2_enabled", 0);
+            sampled.setControlValue("layer0_sampleStart", 0.25f); sampled.setControlValue("layer0_sampleEnd", 0.75f);
             juce::MemoryBlock saved; sampled.getStateInformation(saved);
             ZazzaProcessor recalled;
             require(recalled.restoreState(saved.getData(), static_cast<int>(saved.getSize())) && recalled.sampleName(0) == "My C4.wav", "Embedded sample not restored");
+            require(std::abs(recalled.value("layer0_sampleStart") - 0.25) < 1e-6f && std::abs(recalled.value("layer0_sampleEnd") - 0.75) < 1e-6f
+                    && std::abs(recalled.value("layer0_samplePlayback") - 1) < 1e-6f && std::abs(recalled.value("layer0_samplePitch") - 0) < 1e-6f, "Slice settings lost on recall");
+            auto previousSampleState = juce::ValueTree::fromXml(*juce::AudioProcessor::getXmlFromBinary(saved.getData(), static_cast<int>(saved.getSize())));
+            for (int layer = 0; layer < 3; ++layer) for (const auto* suffix : {"sampleStart", "sampleEnd", "samplePlayback", "samplePitch"})
+                previousSampleState.removeChild(previousSampleState.getChildWithProperty("id", ZazzaProcessor::layerId(layer, suffix)), nullptr);
+            juce::MemoryBlock previousBytes; juce::AudioProcessor::copyXmlToBinary(*previousSampleState.createXml(), previousBytes);
+            ZazzaProcessor previous;
+            require(previous.restoreState(previousBytes.getData(), static_cast<int>(previousBytes.getSize())) && previous.sampleAsset(0)
+                    && previous.value("layer0_samplePlayback") < 0.5f && previous.value("layer0_samplePitch") > 0.5f
+                    && previous.value("layer0_sampleEnd") > 0.99f, "Older embedded-sample presets changed behaviour");
             sampled.prepareToPlay(48000, 512); recalled.prepareToPlay(48000, 512);
             juce::AudioBuffer<float> first(2, 512), second(2, 512); juce::MidiBuffer m1, m2;
             m1.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0); m2 = m1;
@@ -189,11 +205,19 @@ int main(int argc, char** argv) {
             juce::MemoryBlock corruptBytes; juce::AudioProcessor::copyXmlToBinary(*corruptTree.createXml(), corruptBytes);
             require(!recalled.restoreState(corruptBytes.getData(), static_cast<int>(corruptBytes.getSize())) && recalled.sampleName(0) == "My C4.wav", "Bad embedded sample damaged session");
             auto oldState = p.parameters.copyState(); oldState.setProperty("schemaVersion", 1, nullptr);
-            for (int layer = 0; layer < 3; ++layer) for (const auto* suffix : {"source", "sampleRoot"})
+            for (int layer = 0; layer < 3; ++layer) for (const auto* suffix : {"source", "sampleRoot", "sampleStart", "sampleEnd", "samplePlayback", "samplePitch"})
                 oldState.removeChild(oldState.getChildWithProperty("id", ZazzaProcessor::layerId(layer, suffix)), nullptr);
             juce::MemoryBlock oldBytes; juce::AudioProcessor::copyXmlToBinary(*oldState.createXml(), oldBytes);
             require(recalled.restoreState(oldBytes.getData(), static_cast<int>(oldBytes.getSize())) && recalled.sampleName(0).isEmpty()
                     && recalled.value("layer0_source") < 0.5f, "Original v1 session no longer loads");
+            require(std::abs(recalled.value("layer0_samplePlayback") - 0) < 1e-6f && std::abs(recalled.value("layer0_samplePitch") - 1) < 1e-6f,
+                    "Legacy sessions must retain gated pitched playback");
+            // Audition uses the selected region at original speed, independently of note gates.
+            sampled.auditionSample(0);
+            m1.clear(); sampled.processBlock(first, m1);
+            require(sampled.auditionProgress.load() >= 0.25f && sampled.auditionProgress.load() < 0.28f, "Slice audition starts at wrong position/speed");
+            sampled.stopSampleAudition(); m1.clear(); sampled.processBlock(first, m1);
+            require(sampled.auditionProgress.load() < 0, "Slice audition failed to stop");
             const juce::TemporaryFile aiff(".aiff");
             std::unique_ptr<juce::OutputStream> stream = aiff.getFile().createOutputStream();
             juce::AiffAudioFormat format;
@@ -235,6 +259,62 @@ int main(int argc, char** argv) {
             }
             require(releasedDownstream, "Contended sample swap can leave downstream MIDI notes hanging");
         }
+        {
+            ZazzaProcessor chords;
+            require(chords.loadSampleData(1, testWave(), "original-chord.wav").wasOk(), "Chord fixture import failed");
+            chords.setControlValue("drive", 0); chords.setControlValue("duck", 0);
+            for (int layer = 0; layer < 3; ++layer) {
+                chords.setControlValue(ZazzaProcessor::layerId(layer, "enabled"), layer == 1 ? 1.0f : 0.0f);
+                chords.setControlValue(ZazzaProcessor::layerId(layer, "source"), 1);
+                for (int step = 0; step < 32; ++step) chords.setControlValue(ZazzaProcessor::stepId(layer, step, "on"), 0);
+            }
+            chords.setControlValue(ZazzaProcessor::stepId(1, 0, "on"), 1);
+            chords.setControlValue(ZazzaProcessor::stepId(1, 0, "velocity"), juce::MidiMessage::noteOn(1, 60, 0.8f).getFloatVelocity());
+            juce::MemoryBlock chordState; chords.getStateInformation(chordState);
+            ZazzaProcessor single;
+            require(single.restoreState(chordState.getData(), static_cast<int>(chordState.getSize())), "Chord reference restore failed");
+            single.setControlValue("sequencer", 0);
+            chords.prepareToPlay(48000, 512); single.prepareToPlay(48000, 512); chords.preview.store(true);
+            juce::AudioBuffer<float> chordAudio(2, 512), singleAudio(2, 512); juce::MidiBuffer chordMidi, singleMidi;
+            singleMidi.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0);
+            chords.processBlock(chordAudio, chordMidi); single.processBlock(singleAudio, singleMidi);
+            int notes = 0; for (const auto e : chordMidi) if (e.getMessage().isNoteOn()) ++notes;
+            require(notes == 4, "Original sample must preserve the chord in MIDI output");
+            require(chordAudio.getMagnitude(0, 512) > 0.001f, "Original chord is silent");
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < 512; ++i)
+                require(std::abs(chordAudio.getSample(c, i) - singleAudio.getSample(c, i)) < 1e-5f, "Original chord stacks duplicate internal voices");
+        }
+        {
+            auto loud = testWave();
+            for (size_t i = 44; i < loud.getSize(); i += 2) {
+                auto* bytes = static_cast<unsigned char*>(loud.getData());
+                const short value = 30000;
+                bytes[i] = static_cast<unsigned char>(value & 255); bytes[i + 1] = static_cast<unsigned char>((value >> 8) & 255);
+            }
+            ZazzaProcessor imported;
+            require(imported.loadSampleData(0, loud, "loud.wav").wasOk(), "Loud sample import failed");
+            const auto expected = 30000.0f / 32768.0f;
+            juce::MemoryOutputStream extreme;
+            extreme.write("RIFF", 4); extreme.writeInt(36 + 256); extreme.write("WAVEfmt ", 8);
+            extreme.writeInt(16); extreme.writeShort(3); extreme.writeShort(1); extreme.writeInt(48000);
+            extreme.writeInt(192000); extreme.writeShort(4); extreme.writeShort(32); extreme.write("data", 4); extreme.writeInt(256);
+            for (int i = 0; i < 64; ++i) extreme.writeFloat(1e30f);
+            require(imported.loadSampleData(0, extreme.getMemoryBlock(), "extreme.wav").failed(), "Extreme float amplitude accepted without headroom");
+            require(std::abs(imported.sampleAsset(0)->audio.getSample(0, 100) - expected) < 1e-5f, "New import changes the recorded amplitude");
+            juce::MemoryBlock saved; imported.getStateInformation(saved);
+            ZazzaProcessor recalled;
+            require(recalled.restoreState(saved.getData(), static_cast<int>(saved.getSize()))
+                    && std::abs(recalled.sampleAsset(0)->audio.getSample(0, 100) - expected) < 1e-5f, "Full-level sample changed on recall");
+            auto old = juce::ValueTree::fromXml(*juce::AudioProcessor::getXmlFromBinary(saved.getData(), static_cast<int>(saved.getSize())));
+            old.setProperty("schemaVersion", 2, nullptr);
+            old.getChildWithName("SAMPLES").getChild(0).removeProperty("legacyGain", nullptr);
+            juce::MemoryBlock oldBytes; juce::AudioProcessor::copyXmlToBinary(*old.createXml(), oldBytes);
+            require(recalled.restoreState(oldBytes.getData(), static_cast<int>(oldBytes.getSize()))
+                    && std::abs(recalled.sampleAsset(0)->audio.getSample(0, 100) - 0.8f) < 1e-5f, "Legacy preset unexpectedly became louder");
+            recalled.getStateInformation(saved);
+            require(recalled.restoreState(saved.getData(), static_cast<int>(saved.getSize()))
+                    && std::abs(recalled.sampleAsset(0)->audio.getSample(0, 100) - 0.8f) < 1e-5f, "Migrated preset loses legacy gain on second recall");
+        }
         p.setControlValue("layer1_enabled", 0); require(p.exportMidi().getTrack(2)->getNumEvents() == 2, "Muted layer exported notes");
         juce::MemoryOutputStream midiBytes; require(p.exportMidi().writeTo(midiBytes, 1), "Cannot serialize MIDI");
         juce::MemoryInputStream midiInput(midiBytes.getData(), midiBytes.getDataSize(), false); juce::MidiFile parsed;
@@ -249,6 +329,16 @@ int main(int argc, char** argv) {
             juce::MemoryOutputStream png;
             require(juce::PNGImageFormat().writeImageToStream(image, png)
                     && juce::File::getCurrentWorkingDirectory().getChildFile(argv[1]).replaceWithData(png.getData(), png.getDataSize()), "Preview export failed");
+        }
+        if (argc > 2) {
+            ZazzaProcessor preview;
+            require(preview.loadSampleData(0, testWave(), "C4 - waveform and slice.wav").wasOk(), "Slice snapshot import failed");
+            preview.setControlValue("layer0_sampleStart", 0.25f); preview.setControlValue("layer0_sampleEnd", 0.75f);
+            SampleEditor editor(preview, 0, [] {}); editor.setSize(1080, 540);
+            const auto image = editor.createComponentSnapshot(editor.getLocalBounds());
+            juce::MemoryOutputStream png;
+            require(juce::PNGImageFormat().writeImageToStream(image, png)
+                    && juce::File::getCurrentWorkingDirectory().getChildFile(argv[2]).replaceWithData(png.getData(), png.getDataSize()), "Slice snapshot export failed");
         }
         std::cout << "PASS: MIDI/export equivalence, variable blocks at 44.1/48/96 kHz, transport, MIDI input, state migration, notifications outside callback lock, WAV/AIFF imports and limits, embedded samples, invalid-state isolation, generated-idea preservation, mute, mono, editor snapshot\n";
     } catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

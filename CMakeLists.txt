@@ -30,7 +30,7 @@ if(ZAZZA_BUILD_PLUGIN)
         IS_SYNTH TRUE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT TRUE
         IS_MIDI_EFFECT FALSE COPY_PLUGIN_AFTER_BUILD FALSE
         VST3_CATEGORIES Instrument Synth)
-    target_sources(Zazza PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/SampleAsset.cpp)
+    target_sources(Zazza PRIVATE Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/SampleAsset.cpp Source/SampleEditor.cpp)
     target_compile_definitions(Zazza PUBLIC
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
     target_link_libraries(Zazza PRIVATE zazza_engine ZazzaAssets juce::juce_audio_utils

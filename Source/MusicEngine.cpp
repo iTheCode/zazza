@@ -119,20 +119,41 @@ int stepAt(double ppq, double swing) {
     if ((step % 2) != 0 && local < stepBeat(step, swing)) --step;
     return step;
 }
-void Synth::prepare(double rate) { sampleRate = std::max(8000.0, rate); reset(); }
+void Synth::prepare(double rate) { sampleRate = std::max(8000.0, rate); stealFadeSamples = std::max(1, static_cast<int>(sampleRate * 0.005)); reset(); }
 void Synth::reset() {
     for (auto& lane : voices) for (auto& voice : lane) voice = {};
     smoothed = {};
+    nextOrder = 0;
 }
-void Synth::releaseAll() { for (auto& lane : voices) for (auto& voice : lane) voice.released = true; }
+void Synth::releaseAll() { for (auto& lane : voices) for (auto& voice : lane) { voice.released = true; voice.forcedRelease = true; } }
 void Synth::noteOn(int layer, int note, float velocity) {
     auto& lane = voices[static_cast<size_t>(layer)];
-    auto* selected = &lane[0];
-    for (auto& voice : lane) {
-        if (voice.note < 0) { selected = &voice; break; }
-        if (voice.envelope < selected->envelope) selected = &voice;
+    Voice* selected = nullptr;
+    for (size_t i = 0; i < polyphony; ++i) if (lane[i].note < 0) { selected = &lane[i]; break; }
+    if (selected == nullptr) {
+        selected = &lane[0];
+        const auto releasing = [](const Voice& v) { return v.released && (!v.oneShot || v.forcedRelease); };
+        for (size_t i = 1; i < polyphony; ++i) {
+            auto& candidate = lane[i];
+            if ((releasing(candidate) && !releasing(*selected))
+                || (releasing(candidate) == releasing(*selected) && candidate.order < selected->order)) selected = &candidate;
+        }
+        // Continue the displaced waveform for 5 ms instead of resetting it mid-sample.
+        // A voice that has not rendered yet has no audible tail to preserve.
+        if (selected->age > 0) {
+            Voice* tail = nullptr;
+            for (size_t i = polyphony; i < lane.size(); ++i) {
+                if (lane[i].note < 0) { tail = &lane[i]; break; }
+            }
+            // In an extreme burst, preserve sounding audio rather than cutting an
+            // existing tail or allocating on the audio thread. Retry on later note-ons.
+            if (tail == nullptr) return;
+            *tail = *selected;
+            tail->fadeRemaining = stealFadeSamples;
+        }
     }
     *selected = {};
+    selected->order = nextOrder++;
     selected->note = note;
     selected->velocity = std::clamp(velocity, 0.0f, 1.0f);
 }
@@ -155,9 +176,21 @@ std::array<float, 2> Synth::render(const std::array<LayerSound, layers>& sounds,
         std::array<float, 2> sum {};
         for (auto& voice : voices[index]) {
             if (voice.note < 0) continue;
+            const auto& sample = samples[index];
+            if (sample.enabled && voice.sampleEnd < 0) {
+                if (sample.left == nullptr || sample.length < 2 || !std::isfinite(sample.start) || !std::isfinite(sample.end)) { voice.note = -1; continue; }
+                const int begin = static_cast<int>(std::clamp(sample.start, 0.0f, 1.0f) * static_cast<float>(sample.length));
+                voice.sampleEnd = static_cast<int>(std::clamp(sample.end, 0.0f, 1.0f) * static_cast<float>(sample.length));
+                if (voice.sampleEnd - begin < 2) { voice.note = -1; continue; }
+                voice.samplePosition = begin;
+                voice.oneShot = sample.oneShot;
+                voice.sampleIncrement = sample.rate / sampleRate * (sample.pitched ? std::exp2((voice.note - sample.rootNote) / 12.0) : 1.0);
+            }
+            if (!sample.enabled) voice.oneShot = false;
             voice.age += static_cast<float>(1.0 / sampleRate);
-            if (voice.released) voice.envelope *= releaseCoefficient;
+            if (voice.released && (!voice.oneShot || voice.forcedRelease)) voice.envelope *= releaseCoefficient;
             else if (voice.age < 0.004f) voice.envelope = voice.age / 0.004f;
+            else if (voice.oneShot) voice.envelope = 1.0f;
             else voice.envelope *= decayCoefficient;
             if (voice.age >= 0.004f && voice.envelope < 0.00005f) { voice.note = -1; continue; }
             const double hz = 440.0 * std::exp2((voice.note - 69) / 12.0);
@@ -172,22 +205,24 @@ std::array<float, 2> Synth::render(const std::array<LayerSound, layers>& sounds,
             voice.phase += dt;
             if (voice.phase >= 1.0) voice.phase -= 1.0;
             std::array<float, 2> source {{static_cast<float>(wave), static_cast<float>(wave)}};
-            const auto& sample = samples[index];
             if (sample.enabled) {
-                if (sample.left == nullptr || sample.length < 2 || voice.samplePosition >= sample.length - 1) { voice.note = -1; continue; }
+                const int end = std::min(voice.sampleEnd, sample.length);
+                if (sample.left == nullptr || voice.samplePosition >= end) { voice.note = -1; continue; }
                 const auto position = static_cast<int>(voice.samplePosition);
                 const auto fraction = static_cast<float>(voice.samplePosition - position);
-                const auto fade = std::min(1.0f, static_cast<float>(sample.length - 1 - voice.samplePosition) / 64.0f);
+                const auto fade = std::min(1.0f, static_cast<float>(end - voice.samplePosition) / 64.0f);
                 for (size_t channel = 0; channel < 2; ++channel) {
                     const auto* data = channel == 0 || sample.right == nullptr ? sample.left : sample.right;
-                    source[channel] = (data[position] + fraction * (data[position + 1] - data[position])) * fade;
+                    source[channel] = (data[position] + fraction * (data[std::min(position + 1, end - 1)] - data[position])) * fade;
                 }
-                voice.samplePosition += sample.rate / sampleRate * std::exp2((voice.note - sample.rootNote) / 12.0);
+                voice.samplePosition += voice.sampleIncrement;
             }
             for (size_t channel = 0; channel < 2; ++channel) {
                 voice.filter[channel] += filterCoefficient * (source[channel] - voice.filter[channel]);
-                sum[channel] += voice.filter[channel] * voice.envelope * voice.velocity;
+                const float fade = voice.fadeRemaining > 0 ? static_cast<float>(voice.fadeRemaining) / static_cast<float>(stealFadeSamples) : 1.0f;
+                sum[channel] += voice.filter[channel] * voice.envelope * voice.velocity * fade;
             }
+            if (voice.fadeRemaining > 0 && --voice.fadeRemaining == 0) voice.note = -1;
         }
         const auto gain = sound.gain * (layer == 1 ? 0.12f : 0.28f);
         output[0] += sum[0] * gain * std::sqrt((1.0f - sound.pan) * 0.5f);

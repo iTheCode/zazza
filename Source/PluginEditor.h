@@ -1,5 +1,6 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "SampleEditor.h"
 #include <juce_gui_basics/juce_gui_basics.h>
 
 class ZazzaLookAndFeel final : public juce::LookAndFeel_V4 {
@@ -32,7 +33,7 @@ private:
     struct LayerControls {
         juce::ComboBox wave;
         juce::ComboBox source, sampleRoot;
-        juce::TextButton importSample { "IMPORTAR" }, removeSample { "QUITAR" };
+        juce::TextButton importSample { "IMPORTAR" }, removeSample { "QUITAR" }, editSample { "EDITAR SLICE" };
         juce::Label sampleLabel;
         juce::ToggleButton enabled { "ON" };
         std::unique_ptr<ComboAttachment> waveAttachment;
@@ -55,6 +56,8 @@ private:
     juce::TextButton listen { "ESCUCHAR" }, panic { "STOP" }, generate { "NUEVA IDEA" }, apply { "VARIAR PATRON" },
         exportButton { "EXPORTAR MIDI" }, save { "GUARDAR" }, load { "ABRIR" };
     std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<SampleEditor> sampleEditor;
+    void editSample(int layer);
     juce::Label message;
     int selectedLayer = 0, selectedStep = 0;
     void timerCallback() override;

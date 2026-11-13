@@ -30,3 +30,17 @@ La configuración se adaptó de FindNote, conservando la firma/notarización que
 - VST3 y standalone macOS arm64: compilación real mediante `build.py --version 1.2.3`, **CTest 2/2 correcto**, manifiesto VST3 y ambos Info.plist con `1.2.3`, arquitectura y firmas ad hoc verificadas. Esa versión se usó únicamente para comprobar la propagación; los paquetes distribuidos anteriormente se conservaron.
 
 No se volvió a ejecutar pluginval para este cambio de tooling; continúa siendo obligatorio en cada build de Actions. Tampoco se ejecutó el nuevo workflow remoto, la notarización o la publicación. Los registros están en `validation/semantic-release-*.log`. La validación de paquetes de Windows y macOS Intel en las pruebas de release usa fixtures; no equivale a compilar esas plataformas con el nuevo flujo. CI instala Node 24; las pruebas locales se ejecutaron con Node 25.1.0.
+
+
+## Reproducción completa y editor de slices
+
+La regresión de audio se cubre con una muestra sintética de dos segundos: Completo/Original sigue sonando después de un note-off corto, con caída mínima y una nota dos octavas más alta. Las pruebas comprueban también límites del slice, silencio tras el final, Gate, parada forzada, rangos invertidos, conservación del audio importado, persistencia de los controles, migración de presets originales con samples y escucha a velocidad original.
+
+`Source/SampleEditor.*` muestra la forma de onda mono/estéreo, selección no destructiva, límites en segundos, zoom 1–32×, desplazamiento, modos de reproducción y nota raíz. `docs/images/sample-slice.png` es una captura del componente JUCE real. El importador mantiene sus límites de 8 segundos/8 MiB; no se implementan time-stretch, detección de nota o slicing automático por transitorios. Los presets antiguos mantienen Gate/Afinado; las importaciones nuevas seleccionan Completo/Original.
+
+Los registros de esta revisión están en `validation/sample-slice-*.log`; `dist/README.md` identifica los paquetes locales corregidos. Las pruebas usan señales sintéticas: queda pendiente escuchar los samples del usuario en su DAW y ejecutar esta revisión en los runners de Actions/Windows.
+
+
+### Revisión de voces de samples
+
+Se añadieron regresiones de desbordamiento de las 12 voces, disparos en el mismo frame, fade de retirada de 5 ms y agotamiento de colas a tres frecuencias de muestreo. El caso de continuidad falló en el motor anterior y pasó tras la corrección. La integración comprueba que un acorde Original tiene el mismo audio que un solo disparo, aunque conserva cuatro notas MIDI. También cubre amplitud PCM intacta en importaciones nuevas, rechazo de amplitudes float extremas y compatibilidad del nivel al migrar y volver a guardar estados antiguos. La evidencia antes/después está en `validation/voice-review-*.log`; la resolución por hallazgo está en `REVIEW.md`.

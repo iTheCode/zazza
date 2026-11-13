@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace zazza {
@@ -33,6 +34,8 @@ struct SampleView {
     int length = 0, rootNote = 60;
     double rate = 48000.0;
     bool enabled = false;
+    float start = 0.0f, end = 1.0f;
+    bool oneShot = false, pitched = true;
 };
 class Synth {
 public:
@@ -50,8 +53,17 @@ private:
         float envelope = 0.0f, velocity = 0.0f, age = 0.0f;
         std::array<float, 2> filter {};
         bool released = false;
+        bool forcedRelease = false, oneShot = false;
+        int sampleEnd = -1;
+        double sampleIncrement = 1.0;
+        std::uint64_t order = 0;
+        int fadeRemaining = 0;
     };
-    std::array<std::array<Voice, 12>, layers> voices {};
+    // Twelve playable voices and twelve short retirement tails; no audio-thread allocation.
+    static constexpr std::size_t polyphony = 12;
+    std::array<std::array<Voice, polyphony * 2>, layers> voices {};
+    std::uint64_t nextOrder = 0;
+    int stealFadeSamples = 240;
     std::array<LayerSound, layers> smoothed {};
     double sampleRate = 48000.0;
 };

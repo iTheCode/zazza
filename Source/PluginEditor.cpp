@@ -90,6 +90,8 @@ ZazzaEditor::ZazzaEditor(ZazzaProcessor& p)
         controls.sampleLabel.setFont(juce::FontOptions(11.0f));
         controls.importSample.setTooltip("Cargar WAV/AIFF mono o estereo: hasta 8 segundos y 8 MiB. Mejor con una nota individual.");
         controls.removeSample.setTooltip("Volver a sintesis y quitar el sample de esta capa. No borra tu archivo original.");
+        controls.editSample.onClick = [this, l] { editSample(l); };
+        addAndMakeVisible(controls.editSample);
         controls.importSample.onClick = [this, l] { chooseSample(l); };
         controls.removeSample.onClick = [this, l] { owner.clearSample(l); timerCallback(); };
         addAndMakeVisible(controls.source); addAndMakeVisible(controls.sampleRoot); addAndMakeVisible(controls.sampleLabel);
@@ -154,7 +156,8 @@ void ZazzaEditor::resized() {
     for (size_t l = 0; l < layerControls.size(); ++l) {
         const auto x = 30 + static_cast<int>(l) * 364;
         auto& c = layerControls[l]; c.enabled.setBounds(x + 283, 307, 56, 25);
-        c.wave.setBounds(x + 8, 339, 211, 29);
+        c.wave.setBounds(x + 8, 339, 100, 29);
+        c.editSample.setBounds(x + 113, 339, 110, 29);
         c.importSample.setBounds(x + 229, 339, 103, 29);
         c.source.setBounds(x + 8, 376, 108, 27);
         c.sampleRoot.setBounds(x + 170, 376, 68, 27);
@@ -166,6 +169,7 @@ void ZazzaEditor::resized() {
     for (size_t i = 0; i < stepControls.size(); ++i) placeKnob(stepControls[i], {278 + static_cast<int>(i) * 174, 765, 160, 57});
     save.setBounds(830, 779, 120, 32); load.setBounds(962, 779, 120, 32);
     message.setBounds(26, 854, 830, 24);
+    if (sampleEditor) sampleEditor->setBounds(20, 294, 1080, 540);
 }
 void ZazzaEditor::timerCallback() {
     listen.setButtonText(owner.preview.load() ? "ESCUCHANDO" : "ESCUCHAR"); listen.setToggleState(owner.preview.load(), juce::dontSendNotification);
@@ -176,7 +180,7 @@ void ZazzaEditor::timerCallback() {
         controls.sampleLabel.setTooltip(name.isEmpty() ? "Usa preferentemente una nota individual, sin silencio inicial." : name);
         const bool sampleMode = owner.value(ZazzaProcessor::layerId(layer, "source")) > 0.5f;
         controls.wave.setEnabled(!sampleMode); controls.sampleRoot.setEnabled(sampleMode);
-        controls.removeSample.setEnabled(!name.isEmpty());
+        controls.removeSample.setEnabled(!name.isEmpty()); controls.editSample.setEnabled(!name.isEmpty());
     }
     const auto p = owner.pattern();
     const auto scale = static_cast<zazza::Scale>(static_cast<int>(owner.value("scale")));
@@ -271,8 +275,15 @@ void ZazzaEditor::filesDropped(const juce::StringArray& files, int x, int y) {
 }
 void ZazzaEditor::importSampleFile(int layer, const juce::File& file) {
     const auto result = owner.loadSample(layer, file);
-    message.setText(result.wasOk() ? "Sample cargado. Ajusta RAIZ a su nota original y pulsa NUEVA IDEA." : result.getErrorMessage(), juce::dontSendNotification);
+    message.setText(result.wasOk() ? "Sample completo a velocidad original. Elige un slice y escucha antes de generar." : result.getErrorMessage(), juce::dontSendNotification);
     timerCallback();
+    if (result.wasOk()) editSample(layer);
+}
+void ZazzaEditor::editSample(int layer) {
+    sampleEditor = std::make_unique<SampleEditor>(owner, layer, [safe = juce::Component::SafePointer<ZazzaEditor>(this)] {
+        juce::MessageManager::callAsync([safe] { if (safe != nullptr) safe->sampleEditor.reset(); });
+    });
+    addAndMakeVisible(*sampleEditor); sampleEditor->setBounds(20, 294, 1080, 540); sampleEditor->toFront(true);
 }
 void ZazzaEditor::chooseSample(int layer) {
     chooser = std::make_unique<juce::FileChooser>("Importar una nota WAV/AIFF", juce::File(), "*.wav;*.aif;*.aiff");

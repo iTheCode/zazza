@@ -101,6 +101,85 @@ int main() {
                 require(std::abs(audio[0] + audio[1]) < 1e-6f, "Stereo sample channels collapsed");
             }
         }
+        {
+            // A constant two-second recording exposes early decay/gate cuts and exact slice boundaries.
+            std::vector<float> data(96000, 0.5f);
+            std::array<zazza::SampleView, 3> views {};
+            views[0] = {data.data(), nullptr, static_cast<int>(data.size()), 60, 48000, true};
+            views[0].oneShot = true; views[0].pitched = false;
+            std::array<zazza::LayerSound, 3> sounds {};
+            sounds[0].cutoff = 16000; sounds[0].decay = 0.04f;
+            zazza::Synth full; full.prepare(48000); full.noteOn(0, 84, 1);
+            for (int i = 0; i < 95900; ++i) {
+                if (i == 100) full.noteOff(0, 84);
+                const auto audio = full.render(sounds, views);
+                if (i > 48000) require(audio[0] > 0.02f, "Original one-shot truncated by pitch, gate or decay");
+            }
+            for (int i = 0; i < 101; ++i) full.render(sounds, views);
+            require(full.render(sounds, views)[0] == 0, "One-shot exceeded original duration");
+            views[0].start = 0.5f; views[0].end = 0.75f;
+            std::fill(data.begin(), data.begin() + 48000, -0.5f);
+            std::fill(data.begin() + 72000, data.end(), -0.5f);
+            zazza::Synth slice; slice.prepare(48000); slice.noteOn(0, 36, 1);
+            for (int i = 0; i < 23900; ++i) {
+                const auto audio = slice.render(sounds, views);
+                if (i > 1000) require(audio[0] > 0.02f, "Slice played outside selected region");
+            }
+            for (int i = 0; i < 101; ++i) slice.render(sounds, views);
+            require(slice.render(sounds, views)[0] == 0, "Slice crossed end marker");
+            views[0].start = 0; views[0].end = 1;
+            zazza::Synth stopped; stopped.prepare(48000); stopped.noteOn(0, 60, 1);
+            for (int i = 0; i < 2000; ++i) stopped.render(sounds, views);
+            stopped.releaseAll();
+            for (int i = 0; i < 12000; ++i) stopped.render(sounds, views);
+            require(std::abs(stopped.render(sounds, views)[0]) < 0.00001f, "Panic cannot stop one-shot sample");
+            views[0].oneShot = false;
+            zazza::Synth gated; gated.prepare(48000); gated.noteOn(0, 60, 1);
+            for (int i = 0; i < 2000; ++i) gated.render(sounds, views);
+            gated.noteOff(0, 60);
+            for (int i = 0; i < 12000; ++i) gated.render(sounds, views);
+            require(std::abs(gated.render(sounds, views)[0]) < 0.00001f, "Gate mode ignores note off");
+            views[0].start = 0.8f; views[0].end = 0.2f;
+            zazza::Synth invalid; invalid.prepare(48000); invalid.noteOn(0, 60, 1);
+            require(invalid.render(sounds, views)[0] == 0, "Reversed automated slice must be silent");
+        }
+        for (double rate : {44100.0, 48000.0, 96000.0}) {
+            std::vector<float> data(static_cast<size_t>(rate * 2), 0.5f);
+            std::array<zazza::SampleView, 3> views {};
+            views[0] = {data.data(), nullptr, static_cast<int>(data.size()), 60, rate, true};
+            views[0].oneShot = true; views[0].pitched = false;
+            std::array<zazza::LayerSound, 3> sounds {};
+            sounds[0].cutoff = 16000;
+            zazza::Synth dense; dense.prepare(rate);
+            float previous = 0;
+            const float mix = 0.5f * sounds[0].gain * 0.28f * std::sqrt(0.5f);
+            for (int trigger = 0; trigger < 18; ++trigger) {
+                dense.noteOn(0, 40 + trigger, 0.1f + trigger * 0.04f);
+                const auto first = dense.render(sounds, views)[0];
+                if (trigger >= 12) require(std::abs(first - previous) < 0.001f, "Voice stealing introduces a hard audio discontinuity");
+                for (int i = 1; i < static_cast<int>(rate * 0.02); ++i) previous = dense.render(sounds, views)[0];
+                if (trigger >= 12) {
+                    float expected = 0;
+                    for (int n = trigger - 11; n <= trigger; ++n) expected += 0.1f + n * 0.04f;
+                    require(std::abs(previous - mix * expected) < 0.0001f, "Full one-shot pool must retain the newest twelve notes");
+                }
+            }
+            // Several MIDI note-ons can arrive before a single render sample.
+            for (int n = 0; n < 4; ++n) dense.noteOn(0, 80 + n, 0.9f);
+            for (int i = 0; i < static_cast<int>(rate * 0.02); ++i) previous = dense.render(sounds, views)[0];
+            float expected = 4 * 0.9f;
+            for (int n = 10; n < 18; ++n) expected += 0.1f + n * 0.04f;
+            require(std::abs(previous - mix * expected) < 0.0001f, "Same-frame note-ons steal newly allocated voices");
+            for (int n = 0; n < 32; ++n) {
+                dense.noteOn(0, 60 + n, 0.9f);
+                const auto next = dense.render(sounds, views)[0];
+                require(std::isfinite(next) && std::abs(next - previous) < 0.01f, "Exhausted retirement pool cuts sounding audio");
+                previous = next;
+            }
+            dense.releaseAll();
+            for (int i = 0; i < static_cast<int>(rate * 0.3); ++i) dense.render(sounds, views);
+            require(std::abs(dense.render(sounds, views)[0]) < 0.00001f, "Retired voices survive panic");
+        }
         for (double rate : {44100.0, 48000.0, 96000.0, 192000.0}) {
             zazza::Synth synth; synth.prepare(rate);
             std::array<zazza::LayerSound, 3> sounds {};

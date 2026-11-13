@@ -40,6 +40,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout ZazzaProcessor::makeParamete
         real(layerId(l, "pan"), prefix + "Pan", -1.0f, 1.0f, l == 0 ? 0.0f : l == 1 ? -0.2f : 0.2f);
         choice(layerId(l, "source"), prefix + "Fuente", {"Sintesis", "Sample"}, 0);
         integer(layerId(l, "sampleRoot"), prefix + "Nota raiz del sample", 0, 127, 60);
+        real(layerId(l, "sampleStart"), prefix + "Slice inicio", 0.0f, 1.0f, 0.0f);
+        real(layerId(l, "sampleEnd"), prefix + "Slice fin", 0.0f, 1.0f, 1.0f);
+        choice(layerId(l, "samplePlayback"), prefix + "Reproduccion sample", {"Gate / caida", "Completo"}, 0);
+        choice(layerId(l, "samplePitch"), prefix + "Afinacion sample", {"Original", "Afinado"}, 1);
         integer(layerId(l, "octave"), prefix + "Octava", -2, 2, 0);
         choice(layerId(l, "wave"), prefix + "Sintesis", {"Seno / Sub", "Saw / Analog", "Pulse / Hollow", "FM / Glass"}, l == 0 ? 1 : l == 1 ? 2 : 3);
         layout.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{layerId(l, "enabled"), 1}, prefix + "Activa", true));
@@ -65,6 +69,8 @@ ZazzaProcessor::ZazzaProcessor()
         ref.gain = param(layerId(l, "gain")); ref.cutoff = param(layerId(l, "cutoff"));
         ref.decay = param(layerId(l, "decay")); ref.pan = param(layerId(l, "pan"));
         ref.wave = param(layerId(l, "wave")); ref.octave = param(layerId(l, "octave")); ref.enabled = param(layerId(l, "enabled"));
+        ref.sampleStart = param(layerId(l, "sampleStart")); ref.sampleEnd = param(layerId(l, "sampleEnd"));
+        ref.samplePlayback = param(layerId(l, "samplePlayback")); ref.samplePitch = param(layerId(l, "samplePitch"));
         ref.source = param(layerId(l, "source")); ref.sampleRoot = param(layerId(l, "sampleRoot"));
         for (int s = 0; s < zazza::steps; ++s)
             ref.steps[static_cast<size_t>(s)] = {param(stepId(l, s, "on")), param(stepId(l, s, "degree")), param(stepId(l, s, "velocity")), param(stepId(l, s, "gate"))};
@@ -139,6 +145,10 @@ juce::Result ZazzaProcessor::loadSampleData(int layer, const juce::MemoryBlock& 
         synth.reset(); stateChanged.store(true);
     }
     // Host notifications can synchronise with the audio thread; never hold its lock here.
+    setControlValue(layerId(layer, "sampleStart"), 0.0f);
+    setControlValue(layerId(layer, "sampleEnd"), 1.0f);
+    setControlValue(layerId(layer, "samplePlayback"), 1.0f);
+    setControlValue(layerId(layer, "samplePitch"), 0.0f);
     setControlValue(layerId(layer, "source"), 1.0f);
     return juce::Result::ok();
 }
@@ -152,13 +162,17 @@ void ZazzaProcessor::clearSample(int layer) {
     }
     setControlValue(layerId(layer, "source"), 0.0f);
 }
+std::shared_ptr<const zazza::SampleAsset> ZazzaProcessor::sampleAsset(int layer) const {
+    const juce::ScopedLock lock(getCallbackLock());
+    return layer >= 0 && layer < zazza::layers ? samples[static_cast<size_t>(layer)] : nullptr;
+}
 juce::String ZazzaProcessor::sampleName(int layer) const {
     const juce::ScopedLock lock(getCallbackLock());
     if (layer < 0 || layer >= zazza::layers || !samples[static_cast<size_t>(layer)]) return {};
     return samples[static_cast<size_t>(layer)]->name;
 }
 void ZazzaProcessor::prepareToPlay(double sampleRate, int) {
-    rate = sampleRate; synth.prepare(rate); generatedMidi.ensureSize(262144);
+    rate = sampleRate; synth.prepare(rate); auditionLayer = -1; auditionProgress.store(-1); auditionRequest.store(-1); generatedMidi.ensureSize(262144);
     soundingStep.fill(-1); previewPpq = 0.0; wasRunning = false; wasPreview = false;
     masterSmoothed = juce::Decibels::decibelsToGain(master->load());
 }
@@ -207,6 +221,7 @@ void ZazzaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
     const bool changedState = stateChanged.exchange(false);
     const bool panic = panicRequested.exchange(false);
     const bool reset = changedState || panic;
+    if (reset) { auditionLayer = -1; auditionProgress.store(-1); }
     if (!running || jump || sequence != wasSequencer || audition != wasPreview || reset) {
         stopGenerated(0);
         if (jump || sequence != wasSequencer || reset || (wasRunning && !running)) synth.releaseAll();
@@ -228,7 +243,24 @@ void ZazzaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
         octaves[l] = static_cast<int>(r.octave->load());
         if (r.source->load() > 0.5f) {
             sampleViews[l].enabled = true;
-            if (samples[l]) sampleViews[l] = samples[l]->view(static_cast<int>(r.sampleRoot->load()));
+            if (samples[l]) {
+                sampleViews[l] = samples[l]->view(static_cast<int>(r.sampleRoot->load()));
+                sampleViews[l].start = r.sampleStart->load(); sampleViews[l].end = r.sampleEnd->load();
+                sampleViews[l].oneShot = r.samplePlayback->load() > 0.5f;
+                sampleViews[l].pitched = r.samplePitch->load() > 0.5f;
+            }
+        }
+    }
+    const auto auditionCommand = auditionRequest.exchange(-1);
+    if (auditionCommand != -1) {
+        auditionLayer = -1; auditionProgress.store(-1);
+        if (auditionCommand >= 0 && auditionCommand < zazza::layers && samples[static_cast<size_t>(auditionCommand)]) {
+            const auto l = static_cast<size_t>(auditionCommand);
+            const int length = samples[l]->audio.getNumSamples();
+            auditionStart = std::floor(static_cast<double>(refs[l].sampleStart->load()) * length);
+            auditionEnd = static_cast<int>(static_cast<double>(refs[l].sampleEnd->load()) * length);
+            auditionPosition = auditionStart;
+            if (auditionEnd - auditionStart >= 2) auditionLayer = auditionCommand;
         }
     }
     auto input = midi.cbegin();
@@ -263,7 +295,7 @@ void ZazzaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
                     }
                     if (active) for (int n = 0; n < zazza::noteCount(l); ++n) {
                         const auto note = notes[static_cast<size_t>(n)];
-                        synth.noteOn(l, note, event.velocity);
+                        if (n == 0 || !sampleViews[index].enabled || sampleViews[index].pitched) synth.noteOn(l, note, event.velocity);
                         generatedMidi.addEvent(juce::MidiMessage::noteOn(l + 1, note, event.velocity), sample);
                     }
                     soundingStep[index] = desired; soundingNotes[index] = notes;
@@ -279,6 +311,23 @@ void ZazzaProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBu
             channel = std::tanh(channel * amount) * masterSmoothed * pumping;
             maximum = std::max(maximum, std::abs(channel));
         }
+        if (auditionLayer >= 0) {
+            const auto& asset = samples[static_cast<size_t>(auditionLayer)];
+            if (!asset || auditionPosition >= auditionEnd) { auditionLayer = -1; auditionProgress.store(-1); }
+            else {
+                const int at = static_cast<int>(auditionPosition);
+                const float fraction = static_cast<float>(auditionPosition - at);
+                const float fade = static_cast<float>(std::min({1.0, (auditionPosition - auditionStart) / 64.0, (auditionEnd - auditionPosition) / 64.0}));
+                for (int c = 0; c < 2; ++c) {
+                    const auto* data = asset->audio.getReadPointer(std::min(c, asset->audio.getNumChannels() - 1));
+                    const auto raw = data[at] + fraction * (data[std::min(at + 1, auditionEnd - 1)] - data[at]);
+                    audio[static_cast<size_t>(c)] = juce::jlimit(-1.0f, 1.0f, audio[static_cast<size_t>(c)] + raw * fade * masterSmoothed);
+                }
+                auditionProgress.store(static_cast<float>(auditionPosition / asset->audio.getNumSamples()));
+                auditionPosition += asset->rate / rate;
+            }
+        }
+        for (const auto channel : audio) maximum = std::max(maximum, std::abs(channel));
         if (buffer.getNumChannels() == 1) buffer.setSample(0, sample, (audio[0] + audio[1]) * 0.5f);
         else if (buffer.getNumChannels() >= 2) { buffer.setSample(0, sample, audio[0]); buffer.setSample(1, sample, audio[1]); }
     }
@@ -296,11 +345,12 @@ void ZazzaProcessor::getStateInformation(juce::MemoryBlock& block) {
         const juce::ScopedLock lock(getCallbackLock());
         savedSamples = samples;
     }
-    state.setProperty("schemaVersion", 2, nullptr);
+    state.setProperty("schemaVersion", 3, nullptr);
     juce::ValueTree sampleTree("SAMPLES");
     for (int layer = 0; layer < zazza::layers; ++layer) if (const auto& sample = savedSamples[static_cast<size_t>(layer)]) {
         juce::ValueTree child("SAMPLE"); child.setProperty("layer", layer, nullptr);
         child.setProperty("name", sample->name, nullptr);
+        child.setProperty("legacyGain", sample->legacyGain, nullptr);
         child.setProperty("data", juce::Base64::toBase64(sample->encoded.getData(), sample->encoded.getSize()), nullptr);
         sampleTree.addChild(child, -1, nullptr);
     }
@@ -312,10 +362,10 @@ bool ZazzaProcessor::restoreState(const void* data, int size) {
     if (auto xml = getXmlFromBinary(data, size)) if (xml->hasTagName(parameters.state.getType())) {
         auto state = juce::ValueTree::fromXml(*xml);
         const auto version = state.getProperty("schemaVersion", 1).toString();
-        if (version != "1" && version != "2") return false;
+        if (version != "1" && version != "2" && version != "3") return false;
         std::array<std::shared_ptr<const zazza::SampleAsset>, zazza::layers> decoded;
         const auto sampleTree = state.getChildWithName("SAMPLES");
-        if (version == "2") {
+        if (version != "1") {
             if (!sampleTree.isValid() || sampleTree.getNumChildren() > zazza::layers) return false;
             for (const auto& child : sampleTree) {
                 const auto layerText = child.getProperty("layer").toString();
@@ -326,7 +376,10 @@ bool ZazzaProcessor::restoreState(const void* data, int size) {
                 juce::MemoryOutputStream bytes;
                 if (!juce::Base64::convertFromBase64(bytes, base64)) return false;
                 juce::String error;
-                decoded[static_cast<size_t>(layer)] = zazza::SampleAsset::decode(bytes.getMemoryBlock(), child.getProperty("name").toString(), error);
+                const auto legacyGain = child.getProperty("legacyGain").toString();
+                if (version == "3" && legacyGain != "0" && legacyGain != "1") return false;
+                decoded[static_cast<size_t>(layer)] = zazza::SampleAsset::decode(bytes.getMemoryBlock(), child.getProperty("name").toString(), error,
+                                                                                  version != "3" || legacyGain == "1");
                 if (!decoded[static_cast<size_t>(layer)]) return false;
             }
             state.removeChild(sampleTree, nullptr);

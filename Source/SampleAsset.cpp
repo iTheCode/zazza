@@ -2,7 +2,7 @@
 #include <cmath>
 
 namespace zazza {
-std::shared_ptr<const SampleAsset> SampleAsset::decode(const juce::MemoryBlock& bytes, const juce::String& name, juce::String& error) {
+std::shared_ptr<const SampleAsset> SampleAsset::decode(const juce::MemoryBlock& bytes, const juce::String& name, juce::String& error, bool legacyGain) {
     const auto fail = [&error](const juce::String& message) -> std::shared_ptr<const SampleAsset> { error = message; return {}; };
     if (bytes.getSize() == 0 || bytes.getSize() > maxBytes) return fail("Usa un WAV/AIFF de hasta 8 MiB.");
     juce::AudioFormatManager formats;
@@ -21,12 +21,15 @@ std::shared_ptr<const SampleAsset> SampleAsset::decode(const juce::MemoryBlock& 
     for (int channel = 0; channel < sample->audio.getNumChannels(); ++channel)
         for (int i = 0; i < sample->audio.getNumSamples(); ++i) {
             const auto value = sample->audio.getSample(channel, i);
-            if (!std::isfinite(value)) return fail("El sample contiene valores de audio invalidos.");
+            // Float WAVs may exceed digital full scale; reject extreme/corrupt
+            // amplitudes before mixing and waveform drawing, without normalising valid audio.
+            if (!std::isfinite(value) || std::abs(value) > 16.0f) return fail("El sample contiene valores de audio invalidos o fuera de rango.");
             peak = std::max(peak, std::abs(value));
         }
     if (peak < 1e-6f) return fail("El sample no contiene audio audible.");
-    // Leave quiet recordings unchanged; reserve headroom for polyphonic samples.
-    if (peak > 0.8f) sample->audio.applyGain(0.8f / peak);
+    // New imports preserve recorded amplitude; retain the old gain only for old sessions.
+    sample->legacyGain = legacyGain;
+    if (legacyGain && peak > 0.8f) sample->audio.applyGain(0.8f / peak);
     sample->encoded = bytes;
     sample->name = name.substring(0, 256);
     sample->rate = reader->sampleRate;

@@ -48,11 +48,11 @@ Los acordes se forman dentro de la escala seleccionada. En pentatónica producen
 ## Tus samples
 
 - Importa o arrastra un **WAV/AIFF**, mono o estéreo, de **hasta 8 segundos y 8 MiB**, entre 8 y 192 kHz. Hay un sample por capa y se pueden combinar samples con sintetizadores internos.
-- Usa preferentemente **una nota individual o one-shot**, sin silencio al comienzo. En la capa de acordes se disparan cuatro notas del sample; una grabación que ya contiene un acorde se apilaría cuatro veces y puede resultar disonante.
-- Indica la nota original en **Raíz**. Por ejemplo, si grabaste un La3, selecciona A3. La afinación se hace a partir de ese valor; **no se detecta automáticamente**.
-- La transposición cambia la velocidad de reproducción y su duración, como en un sampler básico. No hay time-stretch, detección de BPM, recorte de loops ni extracción de notas de una canción. Las muestras no se repiten en bucle; las controla la envolvente y el gate del paso.
-- Los filtros, caída, nivel y panorama también afectan a las muestras. Para reservar margen al superponer voces, los picos por encima de 0.8 se atenúan al decodificar; no se amplifican grabaciones débiles ni se modifica el archivo original.
-- **Nueva idea conserva tu sample y su raíz**. **Variar patrón** conserva además toda la mezcla. **Quitar** vuelve a síntesis sin borrar el archivo de tu disco. Elegir Sample sin cargar uno produce silencio en esa capa.
+- Usa preferentemente **una nota individual o one-shot**, sin silencio al comienzo. En modo Afinado, la capa de acordes dispara cuatro notas del sample; una grabación que ya contiene un acorde se apilaría cuatro veces y puede resultar disonante.
+- Indica la nota original en **Raíz**. Por ejemplo, si grabaste un La3, selecciona A3. En modo Afinado, la afinación se hace a partir de ese valor; **no se detecta automáticamente**.
+- Cada importación nueva usa Completo / Original para conservar la duración. Puedes elegir un slice manual en la forma de onda. Al activar Afinado, la transposición cambia velocidad y duración; no hay time-stretch, detección de BPM ni extracción automática de notas. Las muestras no se repiten en bucle. Gate / caída sigue la duración de las notas; Completo reproduce toda la selección.
+- Los filtros, nivel y panorama también afectan a las muestras; la caída solo actúa en modo Gate. Las importaciones nuevas conservan su amplitud, sin normalización automática. Los controles de mezcla y el margen fijo por capa siguen actuando sobre la salida; no equivalen a modificar el archivo. Se rechazan muestras no finitas o amplitudes extremas superiores a 16. Los presets antiguos conservan la atenuación que ya usaban.
+- **Nueva idea conserva tu sample, slice, modo y raíz**. **Variar patrón** conserva además toda la mezcla. **Quitar** vuelve a síntesis sin borrar el archivo de tu disco. Elegir Sample sin cargar uno produce silencio en esa capa.
 - Los archivos se leen y decodifican fuera del callback de audio. Cambiar un sample reinicia las voces; puede interrumpir brevemente las notas que están sonando.
 
 ## Sincronización y otros sintetizadores
@@ -71,7 +71,21 @@ En modo MIDI live se reciben note-on, note-off y all-notes/sound-off; no hay ped
 
 Todos los controles y cada paso se exponen como parámetros y se guardan con la sesión del DAW. **Guardar / Abrir** permiten compartir presets `.zazza`, con el mismo estado y semilla. El formato tiene versión y valida parámetros y audio antes de cargar. Los samples se incluyen dentro del preset y del estado del DAW: no dependen de la ruta original. Los archivos malformados no reemplazan el preset actual. El estado completo admite hasta 40 MiB; guardar tres muestras puede producir presets de varios megabytes.
 
-El contrato del esquema 1 conserva los 416 IDs originales. Las futuras adiciones de parámetros conocidos reciben sus valores de fábrica si faltan en un preset antiguo; no heredan el estado de otra sesión. Se siguen rechazando estados incompletos de la versión 1, IDs desconocidos, duplicados y valores inválidos. La versión 1.1 usa el esquema 2 para almacenar las muestras y sigue leyendo sesiones del esquema 1; los nuevos parámetros de fuente/raíz toman sus valores de fábrica. Una sesión 1.1 no se puede abrir en el plugin 1.0. Cambios incompatibles de significado requieren una migración explícita.
+El contrato del esquema 1 conserva los 416 IDs originales. Las futuras adiciones de parámetros conocidos reciben sus valores de fábrica si faltan en un preset antiguo; no heredan el estado de otra sesión. Se siguen rechazando estados incompletos de la versión 1, IDs desconocidos, duplicados y valores inválidos. La revisión actual usa el esquema 3 para distinguir samples con ganancia original de los normalizados en presets antiguos; sigue leyendo los esquemas 1 y 2; los nuevos parámetros de fuente/raíz toman sus valores de fábrica. Una sesión 1.1 no se puede abrir en el plugin 1.0. Cambios incompatibles de significado requieren una migración explícita.
+
+## Editar y escuchar samples
+
+Al importar se abre **EDITAR SLICE** con la forma de onda del archivo completo (dos canales si es estéreo). Se conservan el archivo incrustado y todas sus muestras: elegir un slice no modifica ni sobrescribe el original. Los archivos que exceden 8 segundos/8 MiB se rechazan con un mensaje, no se truncan.
+
+- **Completo + Original** es el valor inicial de cada importación nueva: reproduce la selección completa a su velocidad y tono originales. La caída del sintetizador y los note-offs del patrón no la acortan.
+- **Gate / caída** permite volver al comportamiento rítmico anterior. **Afinado** sigue las notas MIDI respecto de **NOTA RAÍZ**, mediante resampling: cambia tono, velocidad y duración. No hay time-stretch ni detección automática de nota.
+- Arrastra el límite más cercano en la onda; **Shift + arrastrar** mueve el final. Puedes escribir inicio y fin en segundos, ampliar hasta 32× y desplazar la vista. **TODO EL AUDIO** restaura la selección completa.
+- **ESCUCHAR SLICE** reproduce solo la región seleccionada a velocidad original, sin filtro, bombeo o caída, respetando el volumen de salida. **PARAR**, cerrar el editor o cambiar la selección detiene esa escucha. Si el patrón/DAW sigue sonando, se mezcla con la escucha; detén el transporte para oír el slice aislado.
+- Los límites, modo, afinación y raíz se guardan con los presets y sesiones. Los presets anteriores reciben los valores originales Gate/Afinado para conservar su sonido. Tras abrir uno antiguo, selecciona Completo/Original si deseas la nueva reproducción.
+
+Se aplican pequeños fades de borde para reducir clics. El sintetizador mantiene 12 voces por capa. Cuando se llena, prioriza voces en liberación y después la más antigua; la voz desplazada continúa con un fade de 5 ms. Hay 12 colas de retirada adicionales preasignadas: si también se llenan en una ráfaga extrema, se omite el nuevo disparo interno hasta que haya espacio, conservando el MIDI y evitando cortar una cola en seco. Esto no garantiza que todos los samples largos lleguen al final bajo saturación de polifonía. STOP, cambios de transporte y sustitución de muestras interrumpen las voces deliberadamente. En modo Original, la capa de acordes dispara una sola voz interna por paso; el MIDI exportado conserva sus acordes.
+
+![Editor de slice](docs/images/sample-slice.png)
 
 ## Compilar localmente
 
