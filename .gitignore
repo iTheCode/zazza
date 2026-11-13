@@ -13,3 +13,4 @@ __pycache__/
 *.pem
 *.key
 SDKs/
+node_modules/

@@ -5,9 +5,10 @@ import argparse
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = ('.gitignore', 'CMakeLists.txt', 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md')
-TREES = {'Source': {'.cpp', '.h'}, 'Tests': {'.cpp', '.py'}, 'scripts': {'.py'},
-         'assets': {'.gif', '.ttf', '.txt'}, 'docs': {'.md', '.png'}, '.github': {'.yml'}}
+FILES = ('.gitignore', '.nvmrc', 'CMakeLists.txt', 'LICENSE', 'README.md', 'THIRD_PARTY_NOTICES.md',
+         'package.json', 'package-lock.json', 'release.config.cjs')
+TREES = {'Source': {'.cpp', '.h'}, 'Tests': {'.cpp', '.py', '.mjs'}, 'scripts': {'.py', '.mjs'},
+         'assets': {'.gif', '.ttf', '.txt'}, 'docs': {'.md', '.png'}, '.github': {'.yml', '.sh'}}
 
 
 def package(destination):

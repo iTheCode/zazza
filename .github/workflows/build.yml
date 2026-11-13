@@ -1,9 +1,8 @@
-name: Build and test Zazza
+name: Build and release Zazza
 
 on:
   push:
     branches: [main, master]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -12,9 +11,37 @@ permissions:
 
 concurrency:
   group: zazza-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+  version:
+    name: Plan version (no publication)
+    needs: core
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # semantic-release verifies push access even during a dry-run.
+      contents: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - id: plan
+        name: Calculate version without creating tags
+        run: node scripts/plan-release.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   core:
     name: Portable musical engine
     runs-on: ubuntu-24.04
@@ -30,10 +57,17 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s Tests -p '*Tests.py'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:release
 
   plugins:
     name: ${{ matrix.platform }}
-    needs: core
+    needs: [core, version]
+    if: ${{ !cancelled() && needs.core.result == 'success' && (needs.version.result == 'success' || needs.version.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,11 +92,11 @@ jobs:
           python-version: '3.12'
       - name: Test build and validation scripts
         run: python -m unittest discover -s Tests -p '*Tests.py'
-      # Pushes (main/master/v* tags) on macOS are Developer ID signed + notarized for Gatekeeper.
+      # Planned macOS releases retain Developer ID signing and notarization.
       # Secrets: MACOS_DEVELOPER_ID_P12_BASE64, MACOS_DEVELOPER_ID_P12_PASSWORD,
       #          ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (same as iTheCode/vultur)
-      - name: Signing keychain (macOS push)
-        if: runner.os == 'macOS' && github.event_name == 'push'
+      - name: Signing keychain (macOS release)
+        if: runner.os == 'macOS' && needs.version.outputs.publish == 'true'
         env:
           CERT_P12_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
           CERT_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
@@ -76,7 +110,7 @@ jobs:
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-        run: python scripts/build.py --arch "${{ matrix.arch }}" --pluginval --package
+        run: python scripts/build.py --version "${{ needs.version.outputs.version || '0.0.0' }}" --arch "${{ matrix.arch }}" --pluginval --package
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Zazza-${{ matrix.platform }}
@@ -93,3 +127,31 @@ jobs:
             build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
           retention-days: 14
+
+  release:
+    name: Publish verified native packages
+    needs: [core, version, plugins]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: Zazza-*
+          path: dist
+          merge-multiple: true
+      - name: Verify exact version and commit before creating tag and release
+        run: npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

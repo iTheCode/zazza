@@ -80,6 +80,9 @@ def notarize_macos(bundles, build_dir):
 
 
 def build(args):
+    requested_version = getattr(args, 'version', None)
+    if requested_version is not None and not re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', requested_version):
+        raise ValueError('Invalid build version')
     system = platform.system()
     if system not in ('Darwin', 'Windows'):
         raise RuntimeError('Plugin packages require native macOS or Windows. Core tests work on Linux.')
@@ -94,6 +97,8 @@ def build(args):
     dist = (ROOT / args.dist_dir).resolve()
     configure = [cmake, '-S', ROOT, '-B', build_dir, '-DCMAKE_BUILD_TYPE=Release',
                  '-DBUILD_TESTING=ON', '-DZAZZA_BUILD_PLUGIN=ON']
+    # Clear previous overrides when returning to a local build in the same directory.
+    configure += ['-DZAZZA_VERSION=' + requested_version] if requested_version else ['-UZAZZA_VERSION']
     if system == 'Darwin':
         configure += ['-DCMAKE_OSX_ARCHITECTURES=' + arch]
     else:
@@ -113,6 +118,8 @@ def build(args):
     standalone = products / ('Standalone/Zazza.app' if system == 'Darwin' else 'Standalone/Zazza.exe')
     manifest = parse_manifest((vst / 'Contents/Resources/moduleinfo.json').read_text(encoding='utf-8'))
     version = manifest['Version']
+    if requested_version is not None and version != requested_version:
+        raise RuntimeError('Built plugin version differs from the planned release')
     label = 'macOS-' + arch if system == 'Darwin' else 'windows-x64'
     stem = f'Zazza-{version}-{label}'
     for product in (vst, standalone):
@@ -170,6 +177,7 @@ def build(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', help='Stable release version supplied by semantic-release')
     parser.add_argument('--arch', choices=('arm64', 'x86_64'))
     parser.add_argument('--cmake', default='cmake')
     parser.add_argument('--build-dir', default='build')

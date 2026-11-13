@@ -18,3 +18,15 @@ Los registros locales están en `validation/`, excluidos del repositorio y del Z
 La resolución de la revisión anterior está en [REVIEW.md](REVIEW.md). Los cambios 1.1 están en `Source/MusicEngine.*` (arreglos y sampler), `Source/SampleAsset.*` (lectura de audio), `Source/PluginProcessor.*` (generación, persistencia e intercambio de samples) y `Source/PluginEditor.*` (importación, arrastrar archivos y controles). Los paquetes anteriores se conservan; `dist/README.md` identifica la entrega vigente.
 
 No se ha probado dentro de Ableton, FL Studio, Cubase u otro DAW del usuario ni con samples aportados por él: las pruebas usan señales sintéticas WAV/AIFF. No se evalúa subjetivamente que todos los arreglos suenen bien. Hay tres capas de síntesis o muestras propias; la raíz de cada sample se ajusta manualmente. No hay time-stretch, análisis automático de loops, hosting de plugins externos, animación del GIF, firma comercial, notarización ni publicación. Windows y GitHub Actions remotos siguen pendientes.
+
+## Integración de semantic-release
+
+La configuración se adaptó de FindNote, conservando la firma/notarización que ya existía en el workflow de Zazza. Estas comprobaciones son posteriores a las validaciones 1.1.0 descritas arriba:
+
+- `npm ci --ignore-scripts` instala el lockfile y las **24 pruebas Node pasan**: clasificación real de Conventional Commits, notas, resolución de assets del plugin de GitHub, planes sin publicación y rechazo de paquetes ausentes, corruptos, de otro commit/versión, incompletos o sin pluginval. Las pruebas del plan de push inyectan el resultado del dry-run; no se ejecutó un dry-run remoto autenticado ni una publicación.
+- **13 pruebas Python pasan**, incluyendo propagación de versión a CMake, rechazo de discrepancias con el manifiesto y ZIP de fuentes con scripts de firma y release.
+- **actionlint y `git diff --check` correctos**. SHA de setup-node 7.1.0 y download-artifact 8.0.2 comprobados con la API oficial de GitHub.
+- Motor portátil local: configuración con versión externa, compilación y **CTest 1/1 correcto**. CMake rechaza una versión de prerelease.
+- VST3 y standalone macOS arm64: compilación real mediante `build.py --version 1.2.3`, **CTest 2/2 correcto**, manifiesto VST3 y ambos Info.plist con `1.2.3`, arquitectura y firmas ad hoc verificadas. Esa versión se usó únicamente para comprobar la propagación; los paquetes distribuidos anteriormente se conservaron.
+
+No se volvió a ejecutar pluginval para este cambio de tooling; continúa siendo obligatorio en cada build de Actions. Tampoco se ejecutó el nuevo workflow remoto, la notarización o la publicación. Los registros están en `validation/semantic-release-*.log`. La validación de paquetes de Windows y macOS Intel en las pruebas de release usa fixtures; no equivale a compilar esas plataformas con el nuevo flujo. CI instala Node 24; las pruebas locales se ejecutaron con Node 25.1.0.

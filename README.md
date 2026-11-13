@@ -111,7 +111,7 @@ ctest --test-dir build-core -C Release --output-on-failure
 
 ## GitHub Actions
 
-El workflow [build.yml](.github/workflows/build.yml) se ejecuta en pushes a `main`/`master`, tags `v*`, pull requests y manualmente. Tiene permisos de lectura y no crea commits, tags, releases ni despliegues.
+El workflow [build.yml](.github/workflows/build.yml) se ejecuta en pushes a `main`/`master`, pull requests y manualmente. Usa **semantic-release**, siguiendo el flujo de FindNote: comprobar → calcular versión → compilar las tres plataformas → verificar paquetes → publicar. Solo los pushes a `main` con cambios publicables crean el tag y la GitHub Release. No crea commits de versión ni publica en npm. PR, `master` y ejecuciones manuales generan paquetes de comprobación `0.0.0`, sin publicación.
 
 Los jobs instalan **Python 3.12** con [setup-python 7.1.0](https://github.com/actions/setup-python/releases/tag/v7.1.0), fijado por SHA. Cada job nativo ejecuta las pruebas Python, compila, ejecuta CTest y valida con [pluginval 1.0.4](https://github.com/Tracktion/pluginval/releases/tag/v1.0.4) antes de crear paquetes. Los logs se conservan también cuando falla una validación; los paquetes solo se suben si todo pasó.
 
@@ -122,9 +122,24 @@ Los jobs instalan **Python 3.12** con [setup-python 7.1.0](https://github.com/ac
 | macOS 15 Intel | ZIP de VST3 + standalone Intel |
 | Windows 2022 x64 | ZIP de VST3 + standalone Windows x64 |
 
-Los artefactos se descargan desde la ejecución de Actions y se conservan 14 días. Cada uno incluye ZIP, checksum y JSON con commit, versión, plataforma y revisión de JUCE. La versión se cambia en `project(Zazza VERSION ...)` de `CMakeLists.txt`. Un tag por sí solo no cambia esa versión. Las [etiquetas de runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) y las acciones oficiales [checkout](https://github.com/actions/checkout/releases/tag/v7.0.1) y [upload-artifact](https://github.com/actions/upload-artifact/releases/tag/v7.0.2) se verificaron al preparar este proyecto; las acciones se fijan por SHA.
+Los artefactos de Actions se conservan 14 días. Cada uno incluye ZIP, checksum y JSON con commit, versión, plataforma, revisión de JUCE y resultado de pluginval. Las releases publicadas adjuntan los tres ZIP nativos y sus checksums. Antes de crear el tag, `scripts/verify-release.mjs` exige las tres plataformas, la versión calculada, el commit de esa ejecución, VST3 + standalone, pluginval nivel 5 con GUI y hashes correctos. Si una compilación, validación o verificación falla, no se publica.
 
-Para subir el proyecto, conserva `Source/`, `Tests/`, `assets/`, `scripts/`, `docs/`, `.github/`, `.gitignore`, `CMakeLists.txt`, este README y `THIRD_PARTY_NOTICES.md`. Los builds, paquetes, cachés y archivos de coordinación están excluidos. No se inicializó Git ni se hizo commit o push.
+La versión se calcula con Conventional Commits: `fix:` y `perf:` incrementan el parche; `feat:` la versión menor; `feat!:` o un pie `BREAKING CHANGE:` la mayor. `docs:` y `ci:` por sí solos no crean releases después de una release existente. **Sin tags previos, la primera release será `v1.0.0`**; la versión local histórica `1.1.0` no es un tag de publicación. Los commits existentes `feat: zazza synths random` y `fix: missing file` sí son reconocidos. No se ha creado un tag de base ni publicado una release al preparar esta integración.
+
+El planificador hace un dry-run y pasa la versión a `scripts/build.py --version`, que la transmite a CMake como `ZAZZA_VERSION`. El manifiesto generado debe coincidir antes de firmar o empaquetar. En compilaciones locales sin esa opción se conserva el valor predeterminado `1.1.0`. La release se publica en la misma ejecución que construyó los binarios; no depende de que un tag generado por `GITHUB_TOKEN` dispare otro workflow.
+
+Los jobs de compilación tienen permisos de lectura. Solo planificación y publicación solicitan `contents: write`, y ambos se limitan a pushes a `main`. El dry-run necesita ese permiso porque semantic-release comprueba acceso de push aunque no publique ([documentación oficial](https://semantic-release.org/usage/configuration/#dryrun)). Se usa el `GITHUB_TOKEN` de Actions, sin PAT adicional. Node 24 se configura mediante `.nvmrc`; las dependencias de release están fijadas en `package-lock.json` y las actions por SHA.
+
+Se conserva la firma y notarización macOS existente para los paquetes que van a publicarse. Requiere los secrets `MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`, `ASC_KEY_ID`, `ASC_ISSUER_ID` y `ASC_KEY_P8`. Si faltan o fallan, la release falla en lugar de publicar esos paquetes sin firmar. Las ejecuciones de comprobación usan firma ad hoc. Las releases concurrentes de la misma rama no cancelan una publicación que ya esté en curso.
+
+Para subir el proyecto, conserva `Source/`, `Tests/`, `assets/`, `scripts/`, `docs/`, `.github/`, `.gitignore`, `.nvmrc`, `CMakeLists.txt`, `LICENSE`, `package.json`, `package-lock.json`, `release.config.cjs`, este README y `THIRD_PARTY_NOTICES.md`. Los builds, paquetes, cachés, `node_modules` y archivos de coordinación están excluidos.
+
+Para verificar el tooling de release sin publicar, desde la raíz y con Node 24.10 o posterior:
+
+```bash
+npm ci --ignore-scripts
+npm run test:release
+```
 
 También puedes generar un ZIP de fuentes desde la raíz, con Python 3 y sin un ZIP previo en el destino. Incluye `.github/` y los recursos, y excluye builds, herramientas, cachés y datos locales mediante una lista explícita:
 
@@ -141,7 +156,7 @@ Descomprime el paquete de tu arquitectura y copia **la carpeta completa** `VST3/
 | macOS | `~/Library/Audio/Plug-Ins/VST3/` |
 | Windows | `C:\Program Files\Common Files\VST3\` |
 
-Luego vuelve a escanear VST3 desde tu DAW. La app standalone está en `Standalone/`. No se incluye AU, AAX ni VST2. Los binarios no están notarizados ni firmados con un certificado comercial.
+Luego vuelve a escanear VST3 desde tu DAW. La app standalone está en `Standalone/`. No se incluye AU, AAX ni VST2. Los paquetes locales y de comprobación tienen firma ad hoc; el workflow de release exige firma Developer ID y notarización en macOS.
 
 ## Validación y límites
 
