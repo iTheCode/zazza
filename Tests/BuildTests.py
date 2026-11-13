@@ -2,10 +2,11 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 import zipfile
 import argparse
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -92,6 +93,88 @@ if __name__ == '__main__':
 
 
 class MacSigningTests(unittest.TestCase):
+    def test_stapler_success_is_bounded_and_does_not_sleep(self):
+        builder = module('build')
+        with patch.object(builder.subprocess, 'run') as process, patch.object(builder.time, 'sleep') as sleep:
+            builder.run_stapler('validate', Path('Zazza.vst3'))
+            process.assert_called_once_with(['xcrun', 'stapler', 'validate', 'Zazza.vst3'],
+                                            cwd=builder.ROOT, check=True, timeout=120)
+            sleep.assert_not_called()
+
+    def test_stapler_retries_service_failure_and_timeout(self):
+        builder = module('build')
+        for action in ('staple', 'validate'):
+            with self.subTest(action=action), \
+                 patch.object(builder, 'run', side_effect=[subprocess.CalledProcessError(68, 'stapler'),
+                                                          subprocess.TimeoutExpired('stapler', 120), None]) as run, \
+                 patch.object(builder.time, 'sleep') as sleep:
+                builder.run_stapler(action, Path('Zazza.vst3'))
+                self.assertEqual(run.call_args_list, [call('xcrun', 'stapler', action, Path('Zazza.vst3'), timeout=120)] * 3)
+                self.assertEqual(sleep.call_args_list, [call(5), call(10)])
+
+    def test_stapler_permanent_errors_fail_immediately(self):
+        builder = module('build')
+        for code in (64, 65, 66, 73, 77, 1):
+            error = subprocess.CalledProcessError(code, 'stapler')
+            with self.subTest(code=code), patch.object(builder, 'run', side_effect=error) as run, \
+                 patch.object(builder.time, 'sleep') as sleep:
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    builder.run_stapler('validate', 'Zazza.app')
+                self.assertIs(raised.exception, error)
+                run.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_stapler_retry_exhaustion_still_fails(self):
+        builder = module('build')
+        for error in (subprocess.CalledProcessError(68, 'stapler'), subprocess.TimeoutExpired('stapler', 120)):
+            with self.subTest(error=type(error).__name__), patch.object(builder, 'run', side_effect=error) as run, \
+                 patch.object(builder.time, 'sleep') as sleep:
+                with self.assertRaises(type(error)) as raised:
+                    builder.run_stapler('validate', 'Zazza.app')
+                self.assertIs(raised.exception, error)
+                self.assertEqual(run.call_count, 5)
+                self.assertEqual(sleep.call_args_list, [call(5), call(10), call(20), call(40)])
+
+    def test_notarization_retries_only_failed_validation(self):
+        builder = module('build')
+        vst, app = Path('Zazza.vst3'), Path('Zazza.app')
+        validations = 0
+
+        def command(*args, **kwargs):
+            nonlocal validations
+            if args[:4] == ('xcrun', 'stapler', 'validate', vst):
+                validations += 1
+                if validations == 1:
+                    raise subprocess.CalledProcessError(68, args)
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(builder.os.environ, {key: 'fixture' for key in builder.NOTARY_VARS}), \
+             patch.object(builder, 'run', side_effect=command) as run, patch.object(builder.time, 'sleep'):
+            builder.notarize_macos([vst, app], Path(directory))
+            commands = [entry.args for entry in run.call_args_list]
+            self.assertEqual(sum(args[:3] == ('xcrun', 'notarytool', 'submit') for args in commands), 1)
+            self.assertEqual([args for args in commands if args[:2] == ('xcrun', 'stapler')], [
+                ('xcrun', 'stapler', 'staple', vst), ('xcrun', 'stapler', 'validate', vst),
+                ('xcrun', 'stapler', 'validate', vst), ('xcrun', 'stapler', 'staple', app),
+                ('xcrun', 'stapler', 'validate', app)])
+            self.assertEqual(commands[-1], ('spctl', '--assess', '--type', 'execute', '--verbose=2', app))
+
+    def test_notarization_aborts_when_validation_never_recovers(self):
+        builder = module('build')
+
+        def command(*args, **kwargs):
+            if args[:3] == ('xcrun', 'stapler', 'validate'):
+                raise subprocess.CalledProcessError(68, args)
+
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(builder.os.environ, {key: 'fixture' for key in builder.NOTARY_VARS}), \
+             patch.object(builder, 'run', side_effect=command) as run, patch.object(builder.time, 'sleep'):
+            with self.assertRaises(subprocess.CalledProcessError):
+                builder.notarize_macos([Path('Zazza.vst3'), Path('Zazza.app')], Path(directory))
+            self.assertFalse(any(entry.args[0] == 'spctl' for entry in run.call_args_list))
+            self.assertFalse(any(entry.args[:4] == ('xcrun', 'stapler', 'staple', Path('Zazza.app'))
+                                 for entry in run.call_args_list))
+
     def test_signing_configuration(self):
         import importlib.util
         from unittest.mock import patch

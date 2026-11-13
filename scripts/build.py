@@ -12,15 +12,41 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 JUCE_REVISION = 'dabd5ad13cd869cba41046947fffc8e5ce5cd662'
 
 
-def run(*args):
+def run(*args, timeout=None):
     print('+ ' + ' '.join(map(str, args)), flush=True)
-    subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True)
+    subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True, timeout=timeout)
+
+
+STAPLER_RETRY_DELAYS = (5, 10, 20, 40)
+STAPLER_TIMEOUT_SECONDS = 120
+
+
+def run_stapler(action, bundle):
+    """Retry ticket-service failures after notarization, never bypass validation."""
+    attempts = len(STAPLER_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            run('xcrun', 'stapler', action, bundle, timeout=STAPLER_TIMEOUT_SECONDS)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            # Apple's stapler man page: EX_NOHOST (68) includes unexpected
+            # responses from the ticket service. Invalid/revoked tickets and
+            # local file/signature errors must fail immediately.
+            if isinstance(error, subprocess.CalledProcessError) and error.returncode != 68:
+                raise
+            if attempt == attempts - 1:
+                raise
+            delay = STAPLER_RETRY_DELAYS[attempt]
+            reason = 'timeout' if isinstance(error, subprocess.TimeoutExpired) else 'exit code 68'
+            print(f'stapler {action}: {reason}; retry {attempt + 2}/{attempts} in {delay}s', flush=True)
+            time.sleep(delay)
 
 
 def parse_manifest(text):
@@ -73,8 +99,8 @@ def notarize_macos(bundles, build_dir):
         '--key', os.environ['ASC_KEY_PATH'], '--key-id', os.environ['ASC_KEY_ID'],
         '--issuer', os.environ['ASC_ISSUER_ID'])
     for bundle in bundles:
-        run('xcrun', 'stapler', 'staple', bundle)
-        run('xcrun', 'stapler', 'validate', bundle)
+        run_stapler('staple', bundle)
+        run_stapler('validate', bundle)
     app = next(bundle for bundle in bundles if bundle.suffix == '.app')
     run('spctl', '--assess', '--type', 'execute', '--verbose=2', app)
 
